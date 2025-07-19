@@ -14,7 +14,7 @@ jobs:
         run: |
           find . ! -mindepth 1 -name .github/workflows/sync.yml -exec rm -rf {} +
           TAG_NAME=$(gh release list -R TecharoHQ/anubis --json tagName,isLatest -q '(.[] | select(.isLatest)).tagName')
-          gh release download -R TecharoHQ/anubis -O - -p 'anubis-src-vendor-npm-*.tar.gz' "$TAG_NAME" | tar xzvf --exclude='.github/*' --exclude='.gitignore' --strip-components 1 -
+          gh release download -R TecharoHQ/anubis -O - -p 'anubis-src-vendor-npm-*.tar.gz' "$TAG_NAME" | tar -xzvf --exclude='.github/*' --exclude='.gitignore' --strip-components 1 -
           npm install
           npm run build
           git commit -am "$TAG_NAME"
