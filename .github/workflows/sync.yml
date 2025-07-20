@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Push tarball
         run: |
-          find . -mindepth 1 ! -name .github/workflows/sync.yml -exec rm -rf {} +
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '.github' -exec rm -rf {} +
           TAG_NAME=$(gh release list -R TecharoHQ/anubis --json tagName,isLatest -q '(.[] | select(.isLatest)).tagName')
           gh release download -R TecharoHQ/anubis -O - -p 'anubis-src-vendor-npm-*.tar.gz' "$TAG_NAME" | tar xzvf - --exclude='.github/*' --exclude='.gitignore' --strip-components 1
           npm install
