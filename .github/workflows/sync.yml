@@ -17,6 +17,8 @@ jobs:
           gh release download -R TecharoHQ/anubis -O - -p 'anubis-src-vendor-npm-*.tar.gz' "$TAG_NAME" | tar xzvf - --exclude='.github/*' --exclude='.gitignore' --strip-components 1
           npm install
           npm run build
+          git config user.name "GitHub Actions"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "$TAG_NAME"
           git tag "$TAG_NAME"
           git push --tags
