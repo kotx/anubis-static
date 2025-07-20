@@ -20,4 +20,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "$TAG_NAME"
           git tag "$TAG_NAME"
-          git push --tags
+          git push && git push --tags
