@@ -52,61 +52,24 @@ probably allow the algorithm to be made even faster on suitable hardware.
 The BART algorithm is also excellent for determining whether two tables
 contain overlapping IP addresses, just in a few nanoseconds.
 
-A `bart.Lite` wrapper is included, this is ideal for simple IP
-ACLs (access-control-lists) with plain true/false results and no payload.
+## lock-free concurrency
 
-## Example
+There are examples demonstrating how to use bart concurrently with multiple readers and writers.
+Readers can access the table always lock-free, while writers may synchronize using a mutex to ensure
+that only one writer can modify the table persistent at a time, not using Compare-and-Swap (CAS)
+with all the known problems for multiple long-running writers.
 
-```golang
-func ExampleLite_Contains() {
-	lite := new(bart.Lite)
+The combination of lock-free concurrency, fast lookup and update times and low memory consumption
+provides clear advantages for any routing daemon.
 
-	// Insert some prefixes
-	prefixes := []string{
-		"192.168.0.0/16",
-		"192.168.1.0/24",
-		"2001:7c0:3100::/40",
-		"2001:7c0:3100:1::/64",
-		"fc00::/7",
-	}
+But as always, it depends on the specific use case.
 
-	for _, s := range prefixes {
-		pfx := netip.MustParsePrefix(s)
-		lite.Insert(pfx)
-	}
+See the `ExampleLite_concurrent` and `ExampleTable_concurrent` tests for concrete examples of this pattern.
 
-	// Test some IP addresses for black/whitelist containment
-	ips := []string{
-		"192.168.1.100",      // must match
-		"192.168.2.1",        // must match
-		"2001:7c0:3100:1::1", // must match
-		"2001:7c0:3100:2::1", // must match
-		"fc00::1",            // must match
-		//
-		"172.16.0.1",        // must NOT match
-		"2003:dead:beef::1", // must NOT match
-	}
-
-	for _, s := range ips {
-		ip := netip.MustParseAddr(s)
-		ok := lite.Contains(ip)
-		fmt.Printf("%-20s is contained: %t\n", ip, ok)
-	}
-
-	// Output:
-	// 192.168.1.100        is contained: true
-	// 192.168.2.1          is contained: true
-	// 2001:7c0:3100:1::1   is contained: true
-	// 2001:7c0:3100:2::1   is contained: true
-	// fc00::1              is contained: true
-	// 172.16.0.1           is contained: false
-	// 2003:dead:beef::1    is contained: false
-}
-```
 ## API
 
 From release v0.18.x on, bart requires at least go1.23, the `iter.Seq2[netip.Prefix, V]` types for iterators
-are used. The lock-free versions of insert, update and delete are added, but still experimental.
+are used.
 
 ```golang
   import "github.com/gaissmai/bart"
@@ -114,15 +77,16 @@ are used. The lock-free versions of insert, update and delete are added, but sti
   type Table[V any] struct {
   	// Has unexported fields.
   }
-    // Table is an IPv4 and IPv6 routing table with payload V. The zero value is
-    // ready to use.
-
-    // The Table is safe for concurrent readers but not for concurrent readers
-    // and/or writers. Either the update operations must be protected by an
-    // external lock mechanism or the various ...Persist functions must be used
-    // which return a modified routing table by leaving the original unchanged
-
-    // A Table must not be copied by value.
+    // Table represents a thread-safe IPv4 and IPv6 routing table with payload V.
+    //
+    // The zero value is ready to use.
+    //
+    // The Table is safe for concurrent reads, but concurrent reads and writes
+    // must be externally synchronized. Mutation via Insert/Delete requires locks,
+    // or alternatively, use ...Persist methods which return a modified copy
+    // without altering the original table (copy-on-write).
+    //
+    // A Table must not be copied by value; always pass by pointer.
 
   func (t *Table[V]) Contains(ip netip.Addr) bool
   func (t *Table[V]) Lookup(ip netip.Addr) (val V, ok bool)
@@ -173,6 +137,37 @@ are used. The lock-free versions of insert, update and delete are added, but sti
 
   func (t *Table[V]) DumpList4() []DumpListNode[V]
   func (t *Table[V]) DumpList6() []DumpListNode[V]
+```
+
+A `bart.Lite` wrapper is also included, this is ideal for simple IP
+ACLs (access-control-lists) with plain true/false results and no payload.
+Lite is just a convenience wrapper for Table, instantiated with an empty
+struct as payload.
+
+Lite wraps or adapts some methods where needed and delegates almost all
+other methods unmodified to the underlying Table.
+Some delegated methods are pointless without a payload.
+
+```golang
+   type Lite struct {
+     Table[struct{}]
+   }
+
+   func (l *Lite) Exists(pfx netip.Prefix) bool
+   func (l *Lite) Contains(pfx netip.Prefix) bool
+
+   func (l *Lite) Insert(pfx netip.Prefix)
+   func (l *Lite) Delete(pfx netip.Prefix)
+
+   func (l *Lite) InsertPersist(pfx netip.Prefix) *Lite
+   func (l *Lite) DeletePersist(pfx netip.Prefix) *Lite
+
+   func (l *Lite) Union(o *Lite)
+   func (l *Lite) Clone() *Lite
+
+   func (l *Lite) Overlaps(o *Lite) bool
+   func (l *Lite) Overlaps4(o *Lite) bool
+   func (l *Lite) Overlaps6(o *Lite) bool
 ```
 
 ## benchmarks

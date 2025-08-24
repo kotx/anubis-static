@@ -1,3 +1,26 @@
+## [0.6.3](https://github.com/TecharoHQ/yeet/compare/v0.6.2...v0.6.3) (2025-07-23)
+
+
+### Bug Fixes
+
+* mkdeb and mktarball don't reference mkrpm ([#47](https://github.com/TecharoHQ/yeet/issues/47)) ([a9b8658](https://github.com/TecharoHQ/yeet/commit/a9b86589103cfc6ef4e23b37775703aff6cf8bf8))
+
+## [0.6.2](https://github.com/TecharoHQ/yeet/compare/v0.6.1...v0.6.2) (2025-06-23)
+
+
+### Bug Fixes
+
+* **yeet:** make $ fail if the commands fail ([#32](https://github.com/TecharoHQ/yeet/issues/32)) ([063f382](https://github.com/TecharoHQ/yeet/commit/063f382fbf497d9f93821cc0d68b48459e9217bb))
+
+## [0.6.1](https://github.com/TecharoHQ/yeet/compare/v0.6.0...v0.6.1) (2025-06-03)
+
+
+### Bug Fixes
+
+* **internal/mkrpm:** ensure greater reproduciblity ([f515b41](https://github.com/TecharoHQ/yeet/commit/f515b4130e9727b1acb23701dc26b457e4517949))
+* **internal/vfs:** don't give archive/tar Sys data ([b68cbc8](https://github.com/TecharoHQ/yeet/commit/b68cbc825e7597509e0b8f595f6bc743a2b2ea5b))
+* **internal/vfs:** implement gname and uname for modtimefileinfo ([18f16f2](https://github.com/TecharoHQ/yeet/commit/18f16f2d0e1b9f924097733eb799c9d8e278e28a))
+
 # [0.6.0](https://github.com/TecharoHQ/yeet/compare/v0.5.0...v0.6.0) (2025-06-01)
 
 

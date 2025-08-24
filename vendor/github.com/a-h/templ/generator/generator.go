@@ -76,9 +76,8 @@ type GeneratorOptions struct {
 	GeneratedDate string
 }
 
-// HasChanged returns true if the generated file should be written to disk, and therefore, also
-// requires a recompilation.
-func HasChanged(previous, updated GeneratorOutput) bool {
+// HasGoChanged returns true if the Go code has changed between the previous and updated GeneratorOutput.
+func HasGoChanged(previous, updated GeneratorOutput) bool {
 	// If generator options have changed, we need to recompile.
 	if previous.Options.Version != updated.Options.Version {
 		return true
@@ -100,6 +99,19 @@ func HasChanged(previous, updated GeneratorOutput) bool {
 	}
 	for i, prev := range previous.SourceMap.Expressions {
 		if prev != updated.SourceMap.Expressions[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// HasTextChanged returns true if the text literals have changed between the previous and updated GeneratorOutput.
+func HasTextChanged(previous, updated GeneratorOutput) bool {
+	if len(previous.Literals) != len(updated.Literals) {
+		return true
+	}
+	for i, prev := range previous.Literals {
+		if prev != updated.Literals[i] {
 			return true
 		}
 	}
@@ -1344,7 +1356,7 @@ func (g *generator) writeExpressionAttribute(indentLevel int, elementName string
 	}
 	attrKey := html.EscapeString(attr.Key.String())
 	// Value.
-	if (elementName == "a" && attrKey == "href") || (elementName == "form" && attrKey == "action") {
+	if isExpressionAttributeValueURL(elementName, attrKey) {
 		if err := g.writeExpressionAttributeValueURL(indentLevel, attr); err != nil {
 			return err
 		}
@@ -1788,4 +1800,16 @@ func stripTypes(parameters string) string {
 		variableNames = append(variableNames, strings.TrimSpace(p[0]))
 	}
 	return strings.Join(variableNames, ", ")
+}
+
+func isExpressionAttributeValueURL(elementName, attrName string) bool {
+	switch elementName {
+	case "a", "link":
+		return attrName == "href"
+	case "form":
+		return attrName == "action"
+	case "object":
+		return attrName == "data"
+	}
+	return false
 }

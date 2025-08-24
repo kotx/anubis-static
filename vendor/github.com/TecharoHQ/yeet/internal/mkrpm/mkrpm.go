@@ -170,9 +170,10 @@ func Build(p pkgmeta.Package) (foutpath string, err error) {
 		},
 	})
 
+	info.Overridables.RPM.BuildHost = "yeet"
 	info.Overridables.RPM.Group = p.Group
 
-	if *internal.GPGKeyPassword != "" {
+	if *internal.GPGKeyID != "" {
 		slog.Debug("using GPG key", "file", *internal.GPGKeyFile, "id", *internal.GPGKeyID, "password", *internal.GPGKeyPassword)
 		info.Overridables.RPM.Signature.KeyFile = *internal.GPGKeyFile
 		info.Overridables.RPM.Signature.KeyID = internal.GPGKeyID

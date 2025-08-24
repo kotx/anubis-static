@@ -63,6 +63,18 @@ func (fi modTimeFileInfo) ModTime() time.Time {
 	return fi.Time
 }
 
+func (fi modTimeFileInfo) Uname() (string, error) {
+	return "root", nil
+}
+
+func (fi modTimeFileInfo) Gname() (string, error) {
+	return "root", nil
+}
+
+func (fi modTimeFileInfo) Sys() any {
+	return nil
+}
+
 // modTimeDirEntry wraps fs.DirEntry to override Info().ModTime().
 type modTimeDirEntry struct {
 	fs.DirEntry

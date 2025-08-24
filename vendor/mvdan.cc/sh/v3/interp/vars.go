@@ -4,8 +4,11 @@
 package interp
 
 import (
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"maps"
+	mathrand "math/rand/v2"
 	"os"
 	"runtime"
 	"slices"
@@ -16,12 +19,29 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
+func newOverlayEnviron(parent expand.Environ, background bool) *overlayEnviron {
+	oenv := &overlayEnviron{}
+	if !background {
+		oenv.parent = parent
+	} else {
+		// We could do better here if the parent is also an overlayEnviron;
+		// measure with profiles or benchmarks before we choose to do so.
+		oenv.values = make(map[string]expand.Variable)
+		maps.Insert(oenv.values, parent.Each)
+	}
+	return oenv
+}
+
+// overlayEnviron is our main implementation of [expand.WriteEnviron].
 type overlayEnviron struct {
+	// parent is non-nil if [values] is an overlay over a parent environment
+	// which we can safely reuse without data races, such as non-background subshells
+	// or function calls.
 	parent expand.Environ
 	values map[string]expand.Variable
 
 	// We need to know if the current scope is a function's scope, because
-	// functions can modify global variables.
+	// functions can modify global variables. When true, [parent] must not be nil.
 	funcScope bool
 }
 
@@ -29,20 +49,26 @@ func (o *overlayEnviron) Get(name string) expand.Variable {
 	if vr, ok := o.values[name]; ok {
 		return vr
 	}
-	return o.parent.Get(name)
+	if o.parent != nil {
+		return o.parent.Get(name)
+	}
+	return expand.Variable{}
 }
 
 func (o *overlayEnviron) Set(name string, vr expand.Variable) error {
+	prev, inOverlay := o.values[name]
 	// Manipulation of a global var inside a function.
-	if o.funcScope && !vr.Local && !o.values[name].Local {
+	if o.funcScope && !vr.Local && !prev.Local {
 		// In a function, the parent environment is ours, so it's always read-write.
 		return o.parent.(expand.WriteEnviron).Set(name, vr)
+	}
+	if !inOverlay && o.parent != nil {
+		prev = o.parent.Get(name)
 	}
 
 	if o.values == nil {
 		o.values = make(map[string]expand.Variable)
 	}
-	prev := o.Get(name)
 	if vr.Kind == expand.KeepValue {
 		vr.Kind = prev.Kind
 		vr.Str = prev.Str
@@ -66,7 +92,9 @@ func (o *overlayEnviron) Set(name string, vr expand.Variable) error {
 }
 
 func (o *overlayEnviron) Each(f func(name string, vr expand.Variable) bool) {
-	o.parent.Each(f)
+	if o.parent != nil {
+		o.parent.Each(f)
+	}
 	for name, vr := range o.values {
 		if !f(name, vr) {
 			return
@@ -112,12 +140,24 @@ func (r *Runner) lookupVar(name string) expand.Variable {
 		} else {
 			vr.List = r.Params
 		}
+	case "!":
+		if n := len(r.bgProcs); n > 0 {
+			vr.Kind, vr.Str = expand.String, "g"+strconv.Itoa(n)
+		}
 	case "?":
-		vr.Kind, vr.Str = expand.String, strconv.Itoa(r.lastExit)
+		vr.Kind, vr.Str = expand.String, strconv.Itoa(int(r.lastExit.code))
 	case "$":
 		vr.Kind, vr.Str = expand.String, strconv.Itoa(os.Getpid())
 	case "PPID":
 		vr.Kind, vr.Str = expand.String, strconv.Itoa(os.Getppid())
+	case "RANDOM": // not for cryptographic use
+		vr.Kind, vr.Str = expand.String, strconv.Itoa(mathrand.IntN(32767))
+		// TODO: support setting RANDOM to seed it
+	case "SRANDOM": // pseudo-random generator from the system
+		var p [4]byte
+		cryptorand.Read(p[:])
+		n := binary.NativeEndian.Uint32(p[:])
+		vr.Kind, vr.Str = expand.String, strconv.FormatUint(uint64(n), 10)
 	case "DIRSTACK":
 		vr.Kind, vr.List = expand.Indexed, r.dirStack
 	case "0":
@@ -128,12 +168,9 @@ func (r *Runner) lookupVar(name string) expand.Variable {
 			vr.Str = "gosh"
 		}
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-		vr.Kind = expand.String
-		i := int(name[0] - '1')
-		if i < len(r.Params) {
+		if i := int(name[0] - '1'); i < len(r.Params) {
+			vr.Kind = expand.String
 			vr.Str = r.Params[i]
-		} else {
-			vr.Str = ""
 		}
 	}
 	if vr.Kind != expand.Unknown {
@@ -159,7 +196,7 @@ func (r *Runner) envGet(name string) string {
 func (r *Runner) delVar(name string) {
 	if err := r.writeEnv.Set(name, expand.Variable{}); err != nil {
 		r.errf("%s: %v\n", name, err)
-		r.exit = 1
+		r.exit.code = 1
 		return
 	}
 }
@@ -174,7 +211,7 @@ func (r *Runner) setVar(name string, vr expand.Variable) {
 	}
 	if err := r.writeEnv.Set(name, vr); err != nil {
 		r.errf("%s: %v\n", name, err)
-		r.exit = 1
+		r.exit.code = 1
 		return
 	}
 }

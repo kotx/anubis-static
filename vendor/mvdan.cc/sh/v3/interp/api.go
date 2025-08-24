@@ -20,12 +20,10 @@ import (
 	"io"
 	"io/fs"
 	"maps"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
-	"sync"
 	"time"
 
 	"mvdan.cc/sh/v3/expand"
@@ -52,6 +50,8 @@ type Runner struct {
 	// Otherwise, [os.TempDir] is used.
 	Env expand.Environ
 
+	// writeEnv overlays [Runner.Env] so that we can write environment variables
+	// as an overlay.
 	writeEnv expand.WriteEnviron
 
 	// Dir specifies the working directory of the command, which must be an
@@ -105,8 +105,6 @@ type Runner struct {
 	ecfg *expand.Config
 	ectx context.Context // just so that Runner.Subshell can use it again
 
-	lastExpandExit int // used to surface exit codes while expanding fields
-
 	// didReset remembers whether the runner has ever been reset. This is
 	// used so that Reset is automatically called when running any program
 	// or node for the first time on a Runner.
@@ -114,34 +112,39 @@ type Runner struct {
 
 	usedNew bool
 
-	// rand is used mainly to generate temporary files.
-	rand *rand.Rand
-
 	filename string // only if Node was a File
 
 	// >0 to break or continue out of N enclosing loops
 	breakEnclosing, contnEnclosing int
 
-	inLoop    bool
-	inFunc    bool
-	inSource  bool
-	noErrExit bool
+	inLoop       bool
+	inFunc       bool
+	inSource     bool
+	handlingTrap bool // whether we're currently in a trap callback
 
 	// track if a sourced script set positional parameters
 	sourceSetParams bool
 
-	err          error // current shell exit code or fatal error
-	handlingTrap bool  // whether we're currently in a trap callback
-	shellExited  bool  // whether the shell needs to exit
+	// noErrExit prevents failing commands from triggering [optErrExit],
+	// such as the condition in a [syntax.IfClause].
+	noErrExit bool
 
-	// The current and last exit status code. They can only be different if
+	// The current and last exit statuses. They can only be different if
 	// the interpreter is in the middle of running a statement. In that
-	// scenario, 'exit' is the status code for the statement being run, and
-	// 'lastExit' corresponds to the previous statement that was run.
-	exit     int
-	lastExit int
+	// scenario, 'exit' is the status for the current statement being run,
+	// and 'lastExit' corresponds to the previous statement that was run.
+	exit     exitStatus
+	lastExit exitStatus
 
-	bgShells sync.WaitGroup
+	lastExpandExit exitStatus // used to surface exit statuses while expanding fields
+
+	// bgProcs holds all background shells spawned by this runner.
+	// Their PIDs are 1-indexed, from 1 to len(bgProcs), with a "g" prefix
+	// to distinguish them from real PIDs on the host operating system.
+	//
+	// Note that each shell only tracks its direct children;
+	// subshells do not share nor inherit the background PIDs they can wait for.
+	bgProcs []bgProc
 
 	opts runnerOpts
 
@@ -166,6 +169,75 @@ type Runner struct {
 	// Fake signal callbacks
 	callbackErr  string
 	callbackExit string
+}
+
+// exitStatus holds the state of the shell after running one command.
+// Beyond the exit status code, it also holds whether the shell should return or exit,
+// as well as any Go error values that should be given back to the user.
+//
+// TODO(v4): consider replacing ExitStatus with a struct like this,
+// so that an [ExecHandlerFunc] can e.g. mimic `exit 0` or fatal errors
+// with specific exit codes.
+type exitStatus struct {
+	// code is the exit status code.
+	code uint8
+
+	// TODO: consider an enum, as only one of these should be set at a time
+	returning bool // whether the current function `return`ed
+	exiting   bool // whether the current shell is exiting
+	fatalExit bool // whether the current shell is exiting due to a fatal error; err below must not be nil
+
+	// err is a fatal error if fatal is true, or a non-fatal custom error from a handler.
+	// Used so that running a single statement with a custom handler
+	// which returns a non-fatal Go error, such as a Go error wrapping [NewExitStatus],
+	// can be returned by [Runner.Run] without being lost entirely.
+	err error
+}
+
+func (e *exitStatus) ok() bool { return e.code == 0 }
+
+func (e *exitStatus) oneIf(b bool) {
+	if b {
+		e.code = 1
+	} else {
+		e.code = 0
+	}
+}
+
+func (e *exitStatus) fatal(err error) {
+	if !e.fatalExit && err != nil {
+		e.exiting = true
+		e.fatalExit = true
+		e.err = err
+		if e.code == 0 {
+			e.code = 1
+		}
+	}
+}
+
+func (e *exitStatus) fromHandlerError(err error) {
+	if err != nil {
+		var exit errBuiltinExitStatus
+		var es ExitStatus
+		if errors.As(err, &exit) {
+			*e = exitStatus(exit)
+		} else if errors.As(err, &es) {
+			e.err = err
+			e.code = uint8(es)
+		} else {
+			e.fatal(err) // handler's custom fatal error
+		}
+	} else {
+		e.code = 0
+	}
+}
+
+type bgProc struct {
+	// closed when the background process finishes,
+	// after which point the result fields below are set.
+	done chan struct{}
+
+	exit *exitStatus
 }
 
 type alias struct {
@@ -352,9 +424,10 @@ func CallHandler(f CallHandlerFunc) RunnerOption {
 }
 
 // ExecHandler sets one command execution handler,
-// which replaces DefaultExecHandler(2 * time.Second).
+// which replaces [DefaultExecHandler](2 * time.Second).
 //
-// Deprecated: use [ExecHandlers] instead, which allows for middleware handlers.
+// Deprecated: use [ExecHandlers] instead, which allows chaining handlers more easily
+// like middleware functions.
 func ExecHandler(f ExecHandlerFunc) RunnerOption {
 	return func(r *Runner) error {
 		r.execHandler = f
@@ -375,7 +448,7 @@ func ExecHandler(f ExecHandlerFunc) RunnerOption {
 // For instance, a middleware could change the arguments to the "next" call,
 // or it could print log lines before or after the call to "next".
 //
-// The last exec handler is DefaultExecHandler(2 * time.Second).
+// The last exec handler is always [DefaultExecHandler](2 * time.Second).
 func ExecHandlers(middlewares ...func(next ExecHandlerFunc) ExecHandlerFunc) RunnerOption {
 	return func(r *Runner) error {
 		r.execMiddlewares = append(r.execMiddlewares, middlewares...)
@@ -384,7 +457,7 @@ func ExecHandlers(middlewares ...func(next ExecHandlerFunc) ExecHandlerFunc) Run
 }
 
 // TODO: consider porting the middleware API in [ExecHandlers] to [OpenHandler],
-// ReadDirHandler, and StatHandler.
+// [ReadDirHandler2], and [StatHandler].
 
 // TODO(v4): now that [ExecHandlers] allows calling a next handler with changed
 // arguments, one of the two advantages of [CallHandler] is gone. The other is the
@@ -725,10 +798,15 @@ func (r *Runner) Reset() {
 		origStderr: r.origStderr,
 
 		// emptied below, to reuse the space
-		Vars:     r.Vars,
+		Vars: r.Vars,
+
 		dirStack: r.dirStack[:0],
 		usedNew:  r.usedNew,
 	}
+	// Ensure we stop referencing any pointers before we reuse bgProcs.
+	clear(r.bgProcs)
+	r.bgProcs = r.bgProcs[:0]
+
 	if r.Vars == nil {
 		r.Vars = make(map[string]expand.Variable)
 	} else {
@@ -773,21 +851,29 @@ func (r *Runner) Reset() {
 	r.didReset = true
 }
 
-// exitStatus is a non-zero status code resulting from running a shell node.
-type exitStatus uint8
+// ExitStatus is a non-zero status code resulting from running a shell node.
+type ExitStatus uint8
 
-func (s exitStatus) Error() string { return fmt.Sprintf("exit status %d", s) }
+func (s ExitStatus) Error() string { return fmt.Sprintf("exit status %d", s) }
 
 // NewExitStatus creates an error which contains the specified exit status code.
+//
+// Deprecated: use [ExitStatus] directly.
+//
+//go:fix inline
 func NewExitStatus(status uint8) error {
-	return exitStatus(status)
+	return ExitStatus(status)
 }
 
 // IsExitStatus checks whether error contains an exit status and returns it.
+//
+// Deprecated: use [errors.As] with [ExitStatus] directly.
+//
+//go:fix inline
 func IsExitStatus(err error) (status uint8, ok bool) {
-	var s exitStatus
-	if errors.As(err, &s) {
-		return uint8(s), true
+	var es ExitStatus
+	if errors.As(err, &es) {
+		return uint8(es), true
 	}
 	return 0, false
 }
@@ -807,16 +893,12 @@ func (r *Runner) Run(ctx context.Context, node syntax.Node) error {
 		r.Reset()
 	}
 	r.fillExpandConfig(ctx)
-	r.err = nil
-	r.shellExited = false
+	r.exit = exitStatus{}
 	r.filename = ""
 	switch node := node.(type) {
 	case *syntax.File:
 		r.filename = node.Name
 		r.stmts(ctx, node.Stmts)
-		if !r.shellExited {
-			r.exitShell(ctx, r.exit)
-		}
 	case *syntax.Stmt:
 		r.stmt(ctx, node)
 	case syntax.Command:
@@ -824,13 +906,16 @@ func (r *Runner) Run(ctx context.Context, node syntax.Node) error {
 	default:
 		return fmt.Errorf("node can only be File, Stmt, or Command: %T", node)
 	}
-	if r.exit != 0 {
-		r.setErr(NewExitStatus(uint8(r.exit)))
+	r.trapCallback(ctx, r.callbackExit, "exit")
+	maps.Insert(r.Vars, r.writeEnv.Each)
+	// Return the first of: a fatal error, a non-fatal handler error, or the exit code.
+	if err := r.exit.err; err != nil {
+		return err
 	}
-	if r.Vars != nil {
-		maps.Insert(r.Vars, r.writeEnv.Each)
+	if code := r.exit.code; code != 0 {
+		return ExitStatus(code)
 	}
-	return r.err
+	return nil
 }
 
 // Exited reports whether the last Run call should exit an entire shell. This
@@ -839,7 +924,7 @@ func (r *Runner) Run(ctx context.Context, node syntax.Node) error {
 // Note that this state is overwritten at every Run call, so it should be
 // checked immediately after each Run call.
 func (r *Runner) Exited() bool {
-	return r.shellExited
+	return r.exit.exiting
 }
 
 // Subshell makes a copy of the given [Runner], suitable for use concurrently
@@ -850,9 +935,16 @@ func (r *Runner) Exited() bool {
 // Subshell is not safe to use concurrently with [Run]. Orchestrating this is
 // left up to the caller; no locking is performed.
 //
-// To replace e.g. stdin/out/err, do StdIO(r.stdin, r.stdout, r.stderr)(r) on
+// To replace e.g. stdin/out/err, do [StdIO](r.stdin, r.stdout, r.stderr)(r) on
 // the copy.
 func (r *Runner) Subshell() *Runner {
+	return r.subshell(true)
+}
+
+// subshell is like [Runner.subshell], but allows skipping some allocations and copies
+// when creating subshells which will not be used concurrently with the parent shell.
+// TODO(v4): we should expose this, e.g. SubshellForeground and SubshellBackground.
+func (r *Runner) subshell(background bool) *Runner {
 	if !r.didReset {
 		r.Reset()
 	}
@@ -878,10 +970,8 @@ func (r *Runner) Subshell() *Runner {
 
 		origStdout: r.origStdout, // used for process substitutions
 	}
+	r2.writeEnv = newOverlayEnviron(r.writeEnv, background)
 	// Funcs are copied, since they might be modified.
-	// Env vars aren't copied; setVar will copy lists and maps as needed.
-	oenv := &overlayEnviron{parent: r.writeEnv}
-	r2.writeEnv = oenv
 	r2.Funcs = maps.Clone(r.Funcs)
 	r2.Vars = make(map[string]expand.Variable)
 	r2.alias = maps.Clone(r.alias)
