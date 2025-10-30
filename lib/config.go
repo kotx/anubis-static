@@ -43,9 +43,11 @@ type Options struct {
 	OpenGraph            config.OpenGraph
 	ServeRobotsTXT       bool
 	CookieSecure         bool
+	CookieSameSite       http.SameSite
 	Logger               *slog.Logger
 	PublicUrl            string
 	JWTRestrictionHeader string
+	DifficultyInJWT      bool
 }
 
 func LoadPoliciesOrDefault(ctx context.Context, fname string, defaultDifficulty int) (*policy.ParsedConfig, error) {
@@ -105,7 +107,7 @@ func New(opts Options) (*Server, error) {
 		opts.ED25519PrivateKey = priv
 	}
 
-	anubis.BasePrefix = opts.BasePrefix
+	anubis.BasePrefix = strings.TrimRight(opts.BasePrefix, "/")
 	anubis.PublicUrl = opts.PublicUrl
 
 	result := &Server{

@@ -38,7 +38,7 @@ type impl struct{}
 
 func (i *impl) Setup(mux *http.ServeMux) {}
 
-func (i *impl) Issue(r *http.Request, lg *slog.Logger, in *challenge.IssueInput) (templ.Component, error) {
+func (i *impl) Issue(w http.ResponseWriter, r *http.Request, lg *slog.Logger, in *challenge.IssueInput) (templ.Component, error) {
 	u, err := r.URL.Parse(anubis.BasePrefix + "/.within.website/x/cmd/anubis/api/pass-challenge")
 	if err != nil {
 		return nil, fmt.Errorf("can't render page: %w", err)
@@ -57,7 +57,7 @@ func (i *impl) Issue(r *http.Request, lg *slog.Logger, in *challenge.IssueInput)
 }
 
 func (i *impl) Validate(r *http.Request, lg *slog.Logger, in *challenge.ValidateInput) error {
-	wantTime := in.Challenge.IssuedAt.Add(time.Duration(in.Rule.Challenge.Difficulty) * 95 * time.Millisecond)
+	wantTime := in.Challenge.IssuedAt.Add(time.Duration(in.Rule.Challenge.Difficulty) * 80 * time.Millisecond)
 
 	if time.Now().Before(wantTime) {
 		return challenge.NewError("validate", "insufficent time", fmt.Errorf("%w: wanted user to wait until at least %s", challenge.ErrFailed, wantTime.Format(time.RFC3339)))

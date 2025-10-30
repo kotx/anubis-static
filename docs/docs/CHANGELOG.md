@@ -13,6 +13,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- This changes the project to: -->
 
+## v1.23.0: Lyse Hext
+
+- Add default tencent cloud DENY rule.
+- Added `(data)/meta/default-config.yaml` for importing the entire default configuration at once.
+- Add `-custom-real-ip-header` flag to get the original request IP from a different header than `x-real-ip`.
+- Add `contentLength` variable to bot expressions.
+- Add `COOKIE_SAME_SITE_MODE` to force anubis cookies SameSite value, and downgrade automatically from `None` to `Lax` if cookie is insecure.
+- Fix lock convoy problem in decaymap ([#1103](https://github.com/TecharoHQ/anubis/issues/1103)).
+- Fix lock convoy problem in bbolt by implementing the actor pattern ([#1103](https://github.com/TecharoHQ/anubis/issues/1103)).
+- Remove bbolt actorify implementation due to causing production issues.
+- Document missing environment variables in installation guide: `SLOG_LEVEL`, `COOKIE_PREFIX`, `FORCED_LANGUAGE`, and `TARGET_DISABLE_KEEPALIVE` ([#1086](https://github.com/TecharoHQ/anubis/pull/1086)).
+- Add validation warning when persistent storage is used without setting signing keys.
+- Fixed `robots2policy` to properly group consecutive user agents into `any:` instead of only processing the last one ([#925](https://github.com/TecharoHQ/anubis/pull/925)).
+- Make the `fast` algorithm prefer purejs when running in an insecure context.
+- Add the [`s3api` storage backend](./admin/policies.mdx#s3api) to allow Anubis to use S3 API compatible object storage as its storage backend.
+- Fix a "stutter" in the cookie name prefix so the auth cookie is named `techaro.lol-anubis-auth` instead of `techaro.lol-anubis-auth-auth`.
+- Make `cmd/containerbuild` support commas for separating elements of the `--docker-tags` argument as well as newlines.
+- Add the `DIFFICULTY_IN_JWT` option, which allows one to add the `difficulty` field in the JWT claims which indicates the difficulty of the token ([#1063](https://github.com/TecharoHQ/anubis/pull/1063)).
+- Ported the client-side JS to TypeScript to avoid egregious errors in the future.
+- Fixes concurrency problems with very old browsers ([#1082](https://github.com/TecharoHQ/anubis/issues/1082)).
+- Randomly use the Refresh header instead of the meta refresh tag in the metarefresh challenge.
+- Update OpenRC service to truncate the runtime directory before starting Anubis.
+- Make the git client profile more strictly match how the git client behaves.
+- Make the default configuration reward users using normal browsers.
+- Allow multiple consecutive slashes in a row in application paths ([#754](https://github.com/TecharoHQ/anubis/issues/754)).
+- Add option to set `targetSNI` to special keyword 'auto' to indicate that it should be automatically set to the request Host name ([424](https://github.com/TecharoHQ/anubis/issues/424)).
+- The Preact challenge has been removed from the default configuration. It will be deprecated in the future.
+- An open redirect when in subrequest mode has been fixed.
+
+### Potentially breaking changes
+
+#### Multiple checks at once has and-like semantics instead of or-like semantics
+
+Anubis lets you stack multiple checks at once with blocks like this:
+
+```yaml
+name: allow-prometheus
+action: ALLOW
+user_agent_regex: ^prometheus-probe$
+remote_addresses:
+  - 192.168.2.0/24
+```
+
+Previously, this only returned ALLOW if _any one_ of the conditions matched. This behaviour has changed to only return ALLOW if _all_ of the conditions match. I expect this to have some issues with user configs, however this fix is grave enough that it's worth the risk of breaking configs. If this bites you, please let me know so we can make an escape hatch.
+
+### Better error messages
+
+In order to make it easier for legitimate clients to debug issues with their browser configuration and Anubis, Anubis will emit internal error detail in base 64 so that administrators can chase down issues. Future versions of this may also include a variant that encrypts the error detail messages.
+
+### Bug Fixes
+
+Sometimes the enhanced temporal assurance in [#1038](https://github.com/TecharoHQ/anubis/pull/1038) and [#1068](https://github.com/TecharoHQ/anubis/pull/1068) could backfire because Chromium and its ilk randomize the amount of time they wait in order to avoid a timing side channel attack. This has been fixed by both increasing the amount of time a client has to wait for the metarefresh and preact challenges as well as making the server side logic more permissive.
+
 ## v1.22.0: Yda Hext
 
 > Someone has to make an effort at reconciliation if these conflicts are ever going to end.
