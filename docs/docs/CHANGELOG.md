@@ -13,6 +13,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- This changes the project to: -->
 
+## v1.23.1: Lyse Hext - Echo 1
+
+- Fix `SERVE_ROBOTS_TXT` setting after the double slash fix broke it.
+
+### Potentially breaking changes
+
+#### Remove default Tencent Cloud block rule
+
+v1.23.0 added a default rule to block Tencent Cloud. After an email from their abuse team where they promised to take action to clean up their reputation, I have removed the default block rule. If this network causes you problems, please contact [abuse@tencent.com](mailto:abuse@tencent.com) and supply the following information:
+
+- Time of abusive requests.
+- IP address, User-Agent header, or other unique identifiers that can help the abuse team educate the customer about their misbehaving infrastructure.
+- Does the abusive IP address request robots.txt? If not, be sure to include that information.
+- A brief description of the impact to your system such as high system load, pages not rendering, or database system crashes. This helps the provider establish the fact that their customer is causing you measurable harm.
+- Context as to what your service is, what it does, and why they should care.
+
+Mention that you are using Anubis or BotStopper to protect your services. If they do not respond to you, please [contact me](https://xeiaso.net/contact) as soon as possible.
+
+#### Docker / OCI registry clients
+
+Anubis v1.23.0 accidentally blocked Docker / OCI registry clients. In order to explicitly allow them, add an import for `(data)/clients/docker-client.yaml`:
+
+```yaml
+bots:
+  - import: (data)/meta/default-config.yaml
+  - import: (data)/clients/docker-client.yaml
+```
+
+This is technically a regression as these clients used to work in Anubis v1.22.0, however it is allowable to make this opt-in as most websites do not expect to be serving Docker / OCI registry client traffic.
+
 ## v1.23.0: Lyse Hext
 
 - Add default tencent cloud DENY rule.

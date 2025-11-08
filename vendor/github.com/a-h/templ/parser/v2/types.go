@@ -497,6 +497,7 @@ type Element struct {
 	IndentChildren bool
 	TrailingSpace  TrailingSpace
 	NameRange      Range
+	Range          Range
 }
 
 func (e Element) Trailing() TrailingSpace {
@@ -729,6 +730,7 @@ type ScriptContents struct {
 type ScriptElement struct {
 	Attributes []Attribute
 	Contents   []ScriptContents
+	Range      Range
 }
 
 func (se *ScriptElement) IsNode() bool { return true }
@@ -793,6 +795,7 @@ type RawElement struct {
 	Name       string
 	Attributes []Attribute
 	Contents   string
+	Range      Range
 }
 
 func (e *RawElement) IsNode() bool { return true }
@@ -1135,6 +1138,7 @@ func (c *GoComment) Visit(v Visitor) error {
 // HTMLComment.
 type HTMLComment struct {
 	Contents string
+	Range    Range
 }
 
 func (c *HTMLComment) IsNode() bool { return true }
@@ -1155,6 +1159,7 @@ func (c *HTMLComment) Visit(v Visitor) error {
 type CallTemplateExpression struct {
 	// Expression returns a template to execute.
 	Expression Expression
+	Range      Range
 }
 
 func (cte *CallTemplateExpression) IsNode() bool { return true }
@@ -1176,6 +1181,7 @@ type TemplElementExpression struct {
 	Expression Expression
 	// Children returns the elements in a block element.
 	Children []Node
+	Range    Range
 }
 
 func (tee TemplElementExpression) ChildNodes() []Node {
@@ -1256,11 +1262,13 @@ type IfExpression struct {
 	Then       []Node
 	ElseIfs    []ElseIfExpression
 	Else       []Node
+	Range      Range
 }
 
 type ElseIfExpression struct {
 	Expression Expression
 	Then       []Node
+	Range      Range
 }
 
 func (n IfExpression) ChildNodes() []Node {
@@ -1316,6 +1324,7 @@ func (n *IfExpression) Visit(v Visitor) error {
 type SwitchExpression struct {
 	Expression Expression
 	Cases      []CaseExpression
+	Range      Range
 }
 
 func (se SwitchExpression) ChildNodes() []Node {
@@ -1362,6 +1371,7 @@ type CaseExpression struct {
 type ForExpression struct {
 	Expression Expression
 	Children   []Node
+	Range      Range
 }
 
 func (fe ForExpression) ChildNodes() []Node {
@@ -1403,14 +1413,18 @@ func (gc *GoCode) Write(w io.Writer, indent int) error {
 	if isWhitespace(gc.Expression.Value) {
 		gc.Expression.Value = ""
 	}
-	source, err := format.Source([]byte(gc.Expression.Value))
+	if !gc.Multiline {
+		source, err := format.Source([]byte(gc.Expression.Value))
+		if err != nil {
+			source = []byte(gc.Expression.Value)
+		}
+		return writeIndent(w, indent, `{{ `, string(source), ` }}`)
+	}
+	source, err := format.Source([]byte(strings.Repeat("\t", indent+1) + gc.Expression.Value))
 	if err != nil {
 		source = []byte(gc.Expression.Value)
 	}
-	if !gc.Multiline {
-		return writeIndent(w, indent, `{{ `, string(source), ` }}`)
-	}
-	if err := writeIndent(w, indent, "{{"+string(source)+"\n"); err != nil {
+	if err := writeIndent(w, indent, "{{\n"+string(source)+"\n"); err != nil {
 		return err
 	}
 	return writeIndent(w, indent, "}}")

@@ -15,8 +15,8 @@ import (
 
 func Recursive(
 	ctx context.Context,
-	path string,
 	watchPattern *regexp.Regexp,
+	ignorePattern *regexp.Regexp,
 	out chan fsnotify.Event,
 	errors chan error,
 ) (w *RecursiveWatcher, err error) {
@@ -24,25 +24,27 @@ func Recursive(
 	if err != nil {
 		return nil, err
 	}
-	w = NewRecursiveWatcher(ctx, fsnw, watchPattern, out, errors)
-	go w.loop()
-	return w, w.Add(path)
-}
-
-func NewRecursiveWatcher(ctx context.Context, w *fsnotify.Watcher, watchPattern *regexp.Regexp, events chan fsnotify.Event, errors chan error) *RecursiveWatcher {
-	return &RecursiveWatcher{
-		ctx:          ctx,
-		w:            w,
-		WatchPattern: watchPattern,
-		Events:       events,
-		Errors:       errors,
-		timers:       make(map[timerKey]*time.Timer),
+	w = &RecursiveWatcher{
+		ctx:           ctx,
+		w:             fsnw,
+		WatchPattern:  watchPattern,
+		IgnorePattern: ignorePattern,
+		Events:        out,
+		Errors:        errors,
+		timers:        make(map[timerKey]*time.Timer),
+		loopComplete:  sync.WaitGroup{},
 	}
+	w.loopComplete.Add(1)
+	go func() {
+		defer w.loopComplete.Done()
+		w.loop()
+	}()
+	return w, nil
 }
 
 // WalkFiles walks the file tree rooted at path, sending a Create event for each
 // file it encounters.
-func WalkFiles(ctx context.Context, rootPath string, watchPattern *regexp.Regexp, out chan fsnotify.Event) (err error) {
+func WalkFiles(ctx context.Context, rootPath string, watchPattern, ignorePattern *regexp.Regexp, out chan fsnotify.Event) (err error) {
 	return fs.WalkDir(os.DirFS(rootPath), ".", func(path string, info os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -57,6 +59,9 @@ func WalkFiles(ctx context.Context, rootPath string, watchPattern *regexp.Regexp
 		if !watchPattern.MatchString(absPath) {
 			return nil
 		}
+		if ignorePattern != nil && ignorePattern.MatchString(absPath) {
+			return nil
+		}
 		out <- fsnotify.Event{
 			Name: absPath,
 			Op:   fsnotify.Create,
@@ -66,13 +71,15 @@ func WalkFiles(ctx context.Context, rootPath string, watchPattern *regexp.Regexp
 }
 
 type RecursiveWatcher struct {
-	ctx          context.Context
-	w            *fsnotify.Watcher
-	WatchPattern *regexp.Regexp
-	Events       chan fsnotify.Event
-	Errors       chan error
-	timerMu      sync.Mutex
-	timers       map[timerKey]*time.Timer
+	ctx           context.Context
+	w             *fsnotify.Watcher
+	WatchPattern  *regexp.Regexp
+	IgnorePattern *regexp.Regexp
+	Events        chan fsnotify.Event
+	Errors        chan error
+	timerMu       sync.Mutex
+	timers        map[timerKey]*time.Timer
+	loopComplete  sync.WaitGroup
 }
 
 type timerKey struct {
@@ -88,6 +95,10 @@ func timerKeyFromEvent(event fsnotify.Event) timerKey {
 }
 
 func (w *RecursiveWatcher) Close() error {
+	w.loopComplete.Wait()
+	for _, timer := range w.timers {
+		timer.Stop()
+	}
 	return w.w.Close()
 }
 
@@ -109,12 +120,19 @@ func (w *RecursiveWatcher) loop() {
 			if !w.WatchPattern.MatchString(event.Name) {
 				continue
 			}
+			// Skip files that match the ignore pattern.
+			if w.IgnorePattern != nil && w.IgnorePattern.MatchString(event.Name) {
+				continue
+			}
 			tk := timerKeyFromEvent(event)
 			w.timerMu.Lock()
 			t, ok := w.timers[tk]
 			w.timerMu.Unlock()
 			if !ok {
 				t = time.AfterFunc(100*time.Millisecond, func() {
+					if w.ctx.Err() != nil {
+						return
+					}
 					w.Events <- event
 				})
 				w.timerMu.Lock()
