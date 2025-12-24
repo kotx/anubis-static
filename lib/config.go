@@ -16,41 +16,46 @@ import (
 	"github.com/TecharoHQ/anubis"
 	"github.com/TecharoHQ/anubis/data"
 	"github.com/TecharoHQ/anubis/internal"
+	"github.com/TecharoHQ/anubis/internal/honeypot/naive"
 	"github.com/TecharoHQ/anubis/internal/ogtags"
 	"github.com/TecharoHQ/anubis/lib/challenge"
+	"github.com/TecharoHQ/anubis/lib/config"
 	"github.com/TecharoHQ/anubis/lib/localization"
 	"github.com/TecharoHQ/anubis/lib/policy"
-	"github.com/TecharoHQ/anubis/lib/policy/config"
 	"github.com/TecharoHQ/anubis/web"
 	"github.com/TecharoHQ/anubis/xess"
 	"github.com/a-h/templ"
 )
 
 type Options struct {
-	Next                 http.Handler
-	Policy               *policy.ParsedConfig
-	Target               string
-	CookieDynamicDomain  bool
-	CookieDomain         string
-	CookieExpiration     time.Duration
-	CookiePartitioned    bool
-	BasePrefix           string
-	WebmasterEmail       string
-	RedirectDomains      []string
-	ED25519PrivateKey    ed25519.PrivateKey
-	HS512Secret          []byte
-	StripBasePrefix      bool
-	OpenGraph            config.OpenGraph
-	ServeRobotsTXT       bool
-	CookieSecure         bool
-	CookieSameSite       http.SameSite
-	Logger               *slog.Logger
-	PublicUrl            string
-	JWTRestrictionHeader string
-	DifficultyInJWT      bool
+	Next                     http.Handler
+	Policy                   *policy.ParsedConfig
+	Target                   string
+	TargetHost               string
+	TargetSNI                string
+	TargetInsecureSkipVerify bool
+	CookieDynamicDomain      bool
+	CookieDomain             string
+	CookieExpiration         time.Duration
+	CookiePartitioned        bool
+	BasePrefix               string
+	WebmasterEmail           string
+	RedirectDomains          []string
+	ED25519PrivateKey        ed25519.PrivateKey
+	HS512Secret              []byte
+	StripBasePrefix          bool
+	OpenGraph                config.OpenGraph
+	ServeRobotsTXT           bool
+	CookieSecure             bool
+	CookieSameSite           http.SameSite
+	Logger                   *slog.Logger
+	LogLevel                 string
+	PublicUrl                string
+	JWTRestrictionHeader     string
+	DifficultyInJWT          bool
 }
 
-func LoadPoliciesOrDefault(ctx context.Context, fname string, defaultDifficulty int) (*policy.ParsedConfig, error) {
+func LoadPoliciesOrDefault(ctx context.Context, fname string, defaultDifficulty int, logLevel string) (*policy.ParsedConfig, error) {
 	var fin io.ReadCloser
 	var err error
 
@@ -74,7 +79,7 @@ func LoadPoliciesOrDefault(ctx context.Context, fname string, defaultDifficulty 
 		}
 	}(fin)
 
-	anubisPolicy, err := policy.ParseConfig(ctx, fin, fname, defaultDifficulty)
+	anubisPolicy, err := policy.ParseConfig(ctx, fin, fname, defaultDifficulty, logLevel)
 	if err != nil {
 		return nil, fmt.Errorf("can't parse policy file %s: %w", fname, err)
 	}
@@ -116,9 +121,13 @@ func New(opts Options) (*Server, error) {
 		hs512Secret: opts.HS512Secret,
 		policy:      opts.Policy,
 		opts:        opts,
-		OGTags:      ogtags.NewOGTagCache(opts.Target, opts.Policy.OpenGraph, opts.Policy.Store),
-		store:       opts.Policy.Store,
-		logger:      opts.Logger,
+		OGTags: ogtags.NewOGTagCache(opts.Target, opts.Policy.OpenGraph, opts.Policy.Store, ogtags.TargetOptions{
+			Host:               opts.TargetHost,
+			SNI:                opts.TargetSNI,
+			InsecureSkipVerify: opts.TargetInsecureSkipVerify,
+		}),
+		store:  opts.Policy.Store,
+		logger: opts.Logger,
 	}
 
 	mux := http.NewServeMux()
@@ -166,6 +175,33 @@ func New(opts Options) (*Server, error) {
 	registerWithPrefix(anubis.APIPrefix+"pass-challenge", http.HandlerFunc(result.PassChallenge), "GET")
 	registerWithPrefix(anubis.APIPrefix+"check", http.HandlerFunc(result.maybeReverseProxyHttpStatusOnly), "")
 	registerWithPrefix("/", http.HandlerFunc(result.maybeReverseProxyOrPage), "")
+
+	mazeGen, err := naive.New(result.store, result.logger)
+	if err == nil {
+		registerWithPrefix(anubis.APIPrefix+"honeypot/{id}/{stage}", mazeGen, http.MethodGet)
+
+		opts.Policy.Bots = append(
+			opts.Policy.Bots,
+			policy.Bot{
+				Rules:  mazeGen.CheckNetwork(),
+				Action: config.RuleWeigh,
+				Weight: &config.Weight{
+					Adjust: 30,
+				},
+				Name: "honeypot/network",
+			},
+			policy.Bot{
+				Rules:  mazeGen.CheckUA(),
+				Action: config.RuleWeigh,
+				Weight: &config.Weight{
+					Adjust: 30,
+				},
+				Name: "honeypot/user-agent",
+			},
+		)
+	} else {
+		result.logger.Error("can't init honeypot subsystem", "err", err)
+	}
 
 	//goland:noinspection GoBoolExpressions
 	if anubis.Version == "devel" {

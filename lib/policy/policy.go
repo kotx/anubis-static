@@ -6,12 +6,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"sync/atomic"
+	"time"
 
+	"github.com/TecharoHQ/anubis/internal"
+	"github.com/TecharoHQ/anubis/internal/dns"
+	"github.com/TecharoHQ/anubis/lib/config"
 	"github.com/TecharoHQ/anubis/lib/policy/checker"
-	"github.com/TecharoHQ/anubis/lib/policy/config"
 	"github.com/TecharoHQ/anubis/lib/store"
 	"github.com/TecharoHQ/anubis/lib/thoth"
+	"github.com/fahedouch/go-logrotate"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
@@ -29,16 +34,18 @@ var (
 )
 
 type ParsedConfig struct {
-	orig *config.Config
-
-	Bots              []Bot
-	Thresholds        []*Threshold
-	DNSBL             bool
+	Store             store.Interface
+	orig              *config.Config
 	Impressum         *config.Impressum
 	OpenGraph         config.OpenGraph
-	DefaultDifficulty int
+	Bots              []Bot
+	Thresholds        []*Threshold
 	StatusCodes       config.StatusCodes
-	Store             store.Interface
+	DefaultDifficulty int
+	DNSBL             bool
+	DnsCache          *dns.DnsCache
+	Dns               *dns.Dns
+	Logger            *slog.Logger
 }
 
 func newParsedConfig(orig *config.Config) *ParsedConfig {
@@ -49,7 +56,7 @@ func newParsedConfig(orig *config.Config) *ParsedConfig {
 	}
 }
 
-func ParseConfig(ctx context.Context, fin io.Reader, fname string, defaultDifficulty int) (*ParsedConfig, error) {
+func ParseConfig(ctx context.Context, fin io.Reader, fname string, defaultDifficulty int, logLevel string) (*ParsedConfig, error) {
 	c, err := config.Load(fin, fname)
 	if err != nil {
 		return nil, err
@@ -61,6 +68,45 @@ func ParseConfig(ctx context.Context, fin io.Reader, fname string, defaultDiffic
 
 	result := newParsedConfig(c)
 	result.DefaultDifficulty = defaultDifficulty
+
+	if c.Logging.Level != nil {
+		logLevel = c.Logging.Level.String()
+	}
+
+	switch c.Logging.Sink {
+	case config.LogSinkStdio:
+		result.Logger = internal.InitSlog(logLevel, os.Stderr)
+	case config.LogSinkFile:
+		out := &logrotate.Logger{
+			Filename:           c.Logging.Parameters.Filename,
+			FilenameTimeFormat: time.RFC3339,
+			MaxBytes:           c.Logging.Parameters.MaxBytes,
+			MaxAge:             c.Logging.Parameters.MaxAge,
+			MaxBackups:         c.Logging.Parameters.MaxBackups,
+			LocalTime:          c.Logging.Parameters.UseLocalTime,
+			Compress:           c.Logging.Parameters.Compress,
+		}
+
+		result.Logger = internal.InitSlog(logLevel, out)
+	}
+
+	lg := result.Logger.With("at", "config-validate")
+
+	stFac, ok := store.Get(c.Store.Backend)
+	switch ok {
+	case true:
+		store, err := stFac.Build(ctx, c.Store.Parameters)
+		if err != nil {
+			validationErrs = append(validationErrs, err)
+		} else {
+			result.Store = store
+		}
+	case false:
+		validationErrs = append(validationErrs, config.ErrUnknownStoreBackend)
+	}
+
+	result.DnsCache = dns.NewDNSCache(result.orig.DNSTTL.Forward, result.orig.DNSTTL.Reverse, result.Store)
+	result.Dns = dns.New(ctx, result.DnsCache)
 
 	for _, b := range c.Bots {
 		if berr := b.Valid(); berr != nil {
@@ -112,7 +158,7 @@ func ParseConfig(ctx context.Context, fin io.Reader, fname string, defaultDiffic
 		}
 
 		if b.Expression != nil {
-			c, err := NewCELChecker(b.Expression)
+			c, err := NewCELChecker(b.Expression, result.Dns)
 			if err != nil {
 				validationErrs = append(validationErrs, fmt.Errorf("while processing rule %s expressions: %w", b.Name, err))
 			} else {
@@ -122,7 +168,7 @@ func ParseConfig(ctx context.Context, fin io.Reader, fname string, defaultDiffic
 
 		if b.ASNs != nil {
 			if !hasThothClient {
-				slog.Warn("You have specified a Thoth specific check but you have no Thoth client configured. Please read https://anubis.techaro.lol/docs/admin/thoth for more information", "check", "asn", "settings", b.ASNs)
+				lg.Warn("You have specified a Thoth specific check but you have no Thoth client configured. Please read https://anubis.techaro.lol/docs/admin/thoth for more information", "check", "asn", "settings", b.ASNs)
 				continue
 			}
 
@@ -131,7 +177,7 @@ func ParseConfig(ctx context.Context, fin io.Reader, fname string, defaultDiffic
 
 		if b.GeoIP != nil {
 			if !hasThothClient {
-				slog.Warn("You have specified a Thoth specific check but you have no Thoth client configured. Please read https://anubis.techaro.lol/docs/admin/thoth for more information", "check", "geoip", "settings", b.GeoIP)
+				lg.Warn("You have specified a Thoth specific check but you have no Thoth client configured. Please read https://anubis.techaro.lol/docs/admin/thoth for more information", "check", "geoip", "settings", b.GeoIP)
 				continue
 			}
 
@@ -141,7 +187,6 @@ func ParseConfig(ctx context.Context, fin io.Reader, fname string, defaultDiffic
 		if b.Challenge == nil {
 			parsedBot.Challenge = &config.ChallengeRules{
 				Difficulty: defaultDifficulty,
-				ReportAs:   defaultDifficulty,
 				Algorithm:  "fast",
 			}
 		} else {
@@ -151,7 +196,7 @@ func ParseConfig(ctx context.Context, fin io.Reader, fname string, defaultDiffic
 			}
 
 			if parsedBot.Challenge.Algorithm == "slow" {
-				slog.Warn("use of deprecated algorithm \"slow\" detected, please update this to \"fast\" when possible", "name", parsedBot.Name)
+				lg.Warn("use of deprecated algorithm \"slow\" detected, please update this to \"fast\" when possible", "name", parsedBot.Name)
 			}
 		}
 
@@ -168,17 +213,20 @@ func ParseConfig(ctx context.Context, fin io.Reader, fname string, defaultDiffic
 
 	for _, t := range c.Thresholds {
 		if t.Challenge != nil && t.Challenge.Algorithm == "slow" {
-			slog.Warn("use of deprecated algorithm \"slow\" detected, please update this to \"fast\" when possible", "name", t.Name)
+			lg.Warn("use of deprecated algorithm \"slow\" detected, please update this to \"fast\" when possible", "name", t.Name)
+		}
+
+		if t.Challenge != nil && t.Challenge.ReportAs != 0 {
+			lg.Warn("use of deprecated report_as setting detected, please remove this from your policy file when possible", "name", t.Name)
 		}
 
 		if t.Name == "legacy-anubis-behaviour" && t.Expression.String() == "true" {
 			if !warnedAboutThresholds.Load() {
-				slog.Warn("configuration file does not contain thresholds, see docs for details on how to upgrade", "fname", fname, "docs_url", "https://anubis.techaro.lol/docs/admin/configuration/thresholds/")
+				lg.Warn("configuration file does not contain thresholds, see docs for details on how to upgrade", "fname", fname, "docs_url", "https://anubis.techaro.lol/docs/admin/configuration/thresholds/")
 				warnedAboutThresholds.Store(true)
 			}
 
 			t.Challenge.Difficulty = defaultDifficulty
-			t.Challenge.ReportAs = defaultDifficulty
 		}
 
 		threshold, err := ParsedThresholdFromConfig(t)
@@ -188,19 +236,6 @@ func ParseConfig(ctx context.Context, fin io.Reader, fname string, defaultDiffic
 		}
 
 		result.Thresholds = append(result.Thresholds, threshold)
-	}
-
-	stFac, ok := store.Get(c.Store.Backend)
-	switch ok {
-	case true:
-		store, err := stFac.Build(ctx, c.Store.Parameters)
-		if err != nil {
-			validationErrs = append(validationErrs, err)
-		} else {
-			result.Store = store
-		}
-	case false:
-		validationErrs = append(validationErrs, config.ErrUnknownStoreBackend)
 	}
 
 	if len(validationErrs) > 0 {
