@@ -1,6 +1,6 @@
 {
   "name": "@techaro/yeet",
-  "version": "0.6.3",
+  "version": "0.12.1",
   "description": "Yeet those actions out with JavaScript!",
   "directories": {
     "doc": "doc"
@@ -46,7 +46,7 @@
     "**/*.{js,ts,html,json,css,scss,md,mdx}": [
       "prettier -w"
     ],
-    "**/*.{go}": [
+    "**/*.go": [
       "go tool goimports -w"
     ]
   },

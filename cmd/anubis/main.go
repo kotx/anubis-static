@@ -21,7 +21,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,12 +31,13 @@ import (
 	"github.com/TecharoHQ/anubis/internal"
 	libanubis "github.com/TecharoHQ/anubis/lib"
 	"github.com/TecharoHQ/anubis/lib/config"
+	"github.com/TecharoHQ/anubis/lib/metrics"
 	botPolicy "github.com/TecharoHQ/anubis/lib/policy"
 	"github.com/TecharoHQ/anubis/lib/thoth"
 	"github.com/TecharoHQ/anubis/web"
 	"github.com/facebookgo/flagenv"
+	"github.com/google/uuid"
 	_ "github.com/joho/godotenv/autoload"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 )
 
@@ -56,6 +56,7 @@ var (
 	forcedLanguage           = flag.String("forced-language", "", "if set, this language is being used instead of the one from the request's Accept-Language header")
 	hs512Secret              = flag.String("hs512-secret", "", "secret used to sign JWTs, uses ed25519 if not set")
 	cookieSecure             = flag.Bool("cookie-secure", true, "if true, sets the secure flag on Anubis cookies")
+	cookieHttpOnly           = flag.Bool("cookie-http-only", false, "if true, sets the HttpOnly flag on Anubis cookies")
 	cookieSameSite           = flag.String("cookie-same-site", "None", "sets the same site option on Anubis cookies, will auto-downgrade None to Lax if cookie-secure is false. Valid values are None, Lax, Strict, and Default.")
 	ed25519PrivateKeyHex     = flag.String("ed25519-private-key-hex", "", "private key used to sign JWTs, if not set a random one will be assigned")
 	ed25519PrivateKeyHexFile = flag.String("ed25519-private-key-hex-file", "", "file name containing value for ed25519-private-key-hex")
@@ -109,40 +110,13 @@ func doHealthCheck() error {
 	if err != nil {
 		return fmt.Errorf("failed to fetch metrics: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
 	return nil
-}
-
-// parseBindNetFromAddr determine bind network and address based on the given network and address.
-func parseBindNetFromAddr(address string) (string, string) {
-	defaultScheme := "http://"
-	if !strings.Contains(address, "://") {
-		if strings.HasPrefix(address, ":") {
-			address = defaultScheme + "localhost" + address
-		} else {
-			address = defaultScheme + address
-		}
-	}
-
-	bindUri, err := url.Parse(address)
-	if err != nil {
-		log.Fatal(fmt.Errorf("failed to parse bind URL: %w", err))
-	}
-
-	switch bindUri.Scheme {
-	case "unix":
-		return "unix", bindUri.Path
-	case "tcp", "http", "https":
-		return "tcp", bindUri.Host
-	default:
-		log.Fatal(fmt.Errorf("unsupported network scheme %s in address %s", bindUri.Scheme, address))
-	}
-	return "", address
 }
 
 func parseSameSite(s string) http.SameSite {
@@ -159,53 +133,6 @@ func parseSameSite(s string) http.SameSite {
 		log.Fatalf("invalid cookie same-site mode: %s, valid values are None, Lax, Strict, and Default", s)
 	}
 	return http.SameSiteDefaultMode
-}
-
-func setupListener(network string, address string) (net.Listener, string) {
-	formattedAddress := ""
-
-	if network == "" {
-		// keep compatibility
-		network, address = parseBindNetFromAddr(address)
-	}
-
-	switch network {
-	case "unix":
-		formattedAddress = "unix:" + address
-	case "tcp":
-		if strings.HasPrefix(address, ":") { // assume it's just a port e.g. :4259
-			formattedAddress = "http://localhost" + address
-		} else {
-			formattedAddress = "http://" + address
-		}
-	default:
-		formattedAddress = fmt.Sprintf(`(%s) %s`, network, address)
-	}
-
-	listener, err := net.Listen(network, address)
-	if err != nil {
-		log.Fatal(fmt.Errorf("failed to bind to %s: %w", formattedAddress, err))
-	}
-
-	// additional permission handling for unix sockets
-	if network == "unix" {
-		mode, err := strconv.ParseUint(*socketMode, 8, 0)
-		if err != nil {
-			listener.Close()
-			log.Fatal(fmt.Errorf("could not parse socket mode %s: %w", *socketMode, err))
-		}
-
-		err = os.Chmod(address, os.FileMode(mode))
-		if err != nil {
-			err := listener.Close()
-			if err != nil {
-				log.Printf("failed to close listener: %v", err)
-			}
-			log.Fatal(fmt.Errorf("could not change socket mode: %w", err))
-		}
-	}
-
-	return listener, formattedAddress
 }
 
 func makeReverseProxy(target string, targetSNI string, targetHost string, insecureSkipVerify bool, targetDisableKeepAlive bool) (http.Handler, error) {
@@ -245,20 +172,42 @@ func makeReverseProxy(target string, targetSNI string, targetHost string, insecu
 		transport.TLSClientConfig.ServerName = targetSNI
 	}
 
-	rp := httputil.NewSingleHostReverseProxy(targetUri)
-	rp.Transport = transport
+	rp := &httputil.ReverseProxy{
+		Transport: transport,
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetURL(targetUri)
+			// SetURL clears Out.Host; preserve the inbound Host, matching the
+			// previous NewSingleHostReverseProxy default.
+			r.Out.Host = r.In.Host
 
-	if targetHost != "" || targetSNI == "auto" {
-		originalDirector := rp.Director
-		rp.Director = func(req *http.Request) {
-			originalDirector(req)
+			// Rewrite mode re-encodes the outbound query through
+			// url.ParseQuery, which silently drops ';'-separated parameters.
+			// Some upstreams (notably gitweb: /?p=repo.git;a=summary) use ';'
+			// as a query separator, so restore the client's raw query verbatim
+			// to match the previous NewSingleHostReverseProxy behavior.
+			// This fixes https://github.com/TecharoHQ/anubis/issues/1763.
+			if tq := targetUri.RawQuery; tq == "" || r.In.URL.RawQuery == "" {
+				r.Out.URL.RawQuery = tq + r.In.URL.RawQuery
+			} else {
+				r.Out.URL.RawQuery = tq + "&" + r.In.URL.RawQuery
+			}
+
+			// Rewrite mode strips forwarding headers before this runs. Anubis
+			// sets these upstream (see internal/headers.go XForwardedForUpdate),
+			// so copy them through unchanged so the target still sees them.
+			for _, h := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"} {
+				if v, ok := r.In.Header[h]; ok {
+					r.Out.Header[h] = v
+				}
+			}
+
 			if targetHost != "" {
-				req.Host = targetHost
+				r.Out.Host = targetHost
 			}
 			if targetSNI == "auto" {
-				transport.TLSClientConfig.ServerName = req.Host
+				transport.TLSClientConfig.ServerName = r.Out.Host
 			}
-		}
+		},
 	}
 
 	return rp, nil
@@ -267,6 +216,9 @@ func makeReverseProxy(target string, targetSNI string, targetHost string, insecu
 func main() {
 	flagenv.Parse()
 	flag.Parse()
+
+	// Must be set before any concurrent UUID call.
+	uuid.EnableRandPool()
 
 	if *versionFlag {
 		fmt.Println("Anubis", anubis.Version)
@@ -303,11 +255,6 @@ func main() {
 
 	wg := new(sync.WaitGroup)
 
-	if *metricsBind != "" {
-		wg.Add(1)
-		go metricsServer(ctx, *lg.With("subsystem", "metrics"), wg.Done)
-	}
-
 	var rp http.Handler
 	// when using anubis via Systemd and environment variables, then it is not possible to set targe to an empty string but only to space
 	if strings.TrimSpace(*target) != "" {
@@ -339,13 +286,33 @@ func main() {
 	}
 
 	lg.Info("loading policy file", "fname", *policyFname)
-	policy, err := libanubis.LoadPoliciesOrDefault(ctx, *policyFname, *challengeDifficulty, *slogLevel)
+	policy, err := libanubis.LoadPoliciesOrDefault(ctx, *policyFname, *challengeDifficulty, *slogLevel, strings.TrimSpace(*target) == "")
 	if err != nil {
 		log.Fatalf("can't parse policy file: %v", err)
 	}
 	lg = policy.Logger
 	lg.Debug("swapped to new logger")
 	slog.SetDefault(lg)
+
+	if *metricsBind != "" || policy.Metrics != nil {
+		wg.Add(1)
+
+		ms := &metrics.Server{
+			Config: policy.Metrics,
+			Log:    lg,
+		}
+
+		if policy.Metrics == nil {
+			lg.Debug("migrating flags to metrics config", "bind", *metricsBind, "network", *metricsBindNetwork, "socket-mode", *socketMode)
+			ms.Config = &config.Metrics{
+				Bind:       *metricsBind,
+				Network:    *metricsBindNetwork,
+				SocketMode: *socketMode,
+			}
+		}
+
+		go ms.Run(ctx, wg.Done)
+	}
 
 	// Warn if persistent storage is used without a configured signing key
 	if policy.Store.IsPersistent() {
@@ -418,8 +385,8 @@ func main() {
 
 	var redirectDomainsList []string
 	if *redirectDomains != "" {
-		domains := strings.Split(*redirectDomains, ",")
-		for _, domain := range domains {
+		domains := strings.SplitSeq(*redirectDomains, ",")
+		for domain := range domains {
 			_, err = url.Parse(domain)
 			if err != nil {
 				log.Fatalf("cannot parse redirect-domain %q: %s", domain, err.Error())
@@ -427,7 +394,7 @@ func main() {
 			redirectDomainsList = append(redirectDomainsList, strings.TrimSpace(domain))
 		}
 	} else {
-		lg.Warn("REDIRECT_DOMAINS is not set, Anubis will only redirect to the same domain a request is coming from, see https://anubis.techaro.lol/docs/admin/configuration/redirect-domains")
+		lg.Warn("REDIRECT_DOMAINS is not set, Anubis will redirect to any domain, see https://anubis.techaro.lol/docs/admin/configuration/redirect-domains")
 	}
 
 	anubis.CookieName = *cookiePrefix + "-auth"
@@ -464,6 +431,7 @@ func main() {
 		WebmasterEmail:           *webmasterEmail,
 		OpenGraph:                policy.OpenGraph,
 		CookieSecure:             *cookieSecure,
+		CookieHttpOnly:           *cookieHttpOnly,
 		CookieSameSite:           parseSameSite(*cookieSameSite),
 		PublicUrl:                *publicUrl,
 		JWTRestrictionHeader:     *jwtRestrictionHeader,
@@ -480,10 +448,16 @@ func main() {
 	h = internal.RemoteXRealIP(*useRemoteAddress, *bindNetwork, h)
 	h = internal.XForwardedForToXRealIP(h)
 	h = internal.XForwardedForUpdate(*xffStripPrivate, h)
-	h = internal.JA4H(h)
+	if policy.NeedJA4H {
+		h = internal.JA4H(h)
+	}
 
 	srv := http.Server{Handler: h, ErrorLog: internal.GetFilteredHTTPLogger()}
-	listener, listenerUrl := setupListener(*bindNetwork, *bind)
+	listener, listenerUrl, err := internal.SetupListener(*bindNetwork, *bind, *socketMode)
+	if err != nil {
+		log.Fatalf("SetupListener(%q, %q, %q): %v", *bindNetwork, *bind, *socketMode, err)
+	}
+
 	lg.Info(
 		"listening",
 		"url", listenerUrl,
@@ -516,48 +490,6 @@ func main() {
 		log.Fatal(err)
 	}
 	wg.Wait()
-}
-
-func metricsServer(ctx context.Context, lg slog.Logger, done func()) {
-	defer done()
-
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		st, ok := internal.GetHealth("anubis")
-		if !ok {
-			slog.Error("health service anubis does not exist, file a bug")
-		}
-
-		switch st {
-		case healthv1.HealthCheckResponse_NOT_SERVING:
-			http.Error(w, "NOT OK", http.StatusInternalServerError)
-			return
-		case healthv1.HealthCheckResponse_SERVING:
-			fmt.Fprintln(w, "OK")
-			return
-		default:
-			http.Error(w, "UNKNOWN", http.StatusFailedDependency)
-			return
-		}
-	})
-
-	srv := http.Server{Handler: mux, ErrorLog: internal.GetFilteredHTTPLogger()}
-	listener, metricsUrl := setupListener(*metricsBindNetwork, *metricsBind)
-	lg.Debug("listening for metrics", "url", metricsUrl)
-
-	go func() {
-		<-ctx.Done()
-		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(c); err != nil {
-			log.Printf("cannot shut down: %v", err)
-		}
-	}()
-
-	if err := srv.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
-	}
 }
 
 func extractEmbedFS(fsys embed.FS, root string, destDir string) error {

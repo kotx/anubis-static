@@ -1,4 +1,4 @@
-// Code generated from file "11-nodemethods_tmpl.go"; DO NOT EDIT.
+// Code generated from file "commonmethods_tmpl.go"; DO NOT EDIT.
 
 // Copyright (c) 2025 Karl Gaissmaier
 // SPDX-License-Identifier: MIT
@@ -14,6 +14,7 @@ import (
 
 	"github.com/gaissmai/bart/internal/allot"
 	"github.com/gaissmai/bart/internal/art"
+	"github.com/gaissmai/bart/internal/value"
 )
 
 // Insert inserts a network prefix and its associated value into the
@@ -110,7 +111,7 @@ func (n *BartNode[V]) Insert(pfx netip.Prefix, val V, depth int) (exists bool) {
 // InsertPersist is similar to insert but the receiver isn't modified.
 // Assumes the caller has pre-cloned the root (COW). It clones the
 // internal nodes along the descent path before mutating them.
-func (n *BartNode[V]) InsertPersist(cloneFn CloneFunc[V], pfx netip.Prefix, val V, depth int) (exists bool) {
+func (n *BartNode[V]) InsertPersist(cloneFn value.CloneFunc[V], pfx netip.Prefix, val V, depth int) (exists bool) {
 	ip := pfx.Addr() // the pfx must be in canonical form
 	octets := ip.AsSlice()
 	lastOctetPlusOne, lastBits := LastOctetPlusOneAndLastBits(pfx)
@@ -293,7 +294,7 @@ func (n *BartNode[V]) Delete(pfx netip.Prefix) (exists bool) {
 
 	// find the trie node
 	for depth, octet := range octets {
-		depth = depth & DepthMask // BCE, Delete must be fast
+		depth &= DepthMask // BCE, Delete must be fast
 
 		// push current node on stack for path recording
 		stack[depth] = n
@@ -361,7 +362,7 @@ func (n *BartNode[V]) Delete(pfx netip.Prefix) (exists bool) {
 // DeletePersist is similar to delete but does not mutate the original trie.
 // Assumes the caller has pre-cloned the root (COW). It clones the
 // internal nodes along the descent path before mutating them.
-func (n *BartNode[V]) DeletePersist(cloneFn CloneFunc[V], pfx netip.Prefix) (exists bool) {
+func (n *BartNode[V]) DeletePersist(cloneFn value.CloneFunc[V], pfx netip.Prefix) (exists bool) {
 	ip := pfx.Addr() // the pfx must be in canonical form
 	is4 := ip.Is4()
 	octets := ip.AsSlice()
@@ -535,7 +536,7 @@ func (n *BartNode[V]) Modify(pfx netip.Prefix, cb func(val V, found bool) (_ V, 
 
 	// find the proper trie node to update prefix
 	for depth, octet := range octets {
-		depth = depth & DepthMask // BCE
+		depth &= DepthMask // BCE
 
 		// push current node on stack for path recording
 		stack[depth] = n
@@ -710,7 +711,7 @@ func (n *BartNode[V]) EqualRec(o *BartNode[V]) bool {
 
 	for idx, nVal := range n.AllIndices() {
 		oVal := o.MustGetPrefix(idx) // mustGet is ok, bitsets are equal
-		if !Equal(nVal, oVal) {
+		if !value.Equal(nVal, oVal) {
 			return false
 		}
 	}
@@ -744,7 +745,7 @@ func (n *BartNode[V]) EqualRec(o *BartNode[V]) bool {
 			}
 
 			// compare values
-			if !Equal(nKid.Value, oKid.Value) {
+			if !value.Equal(nKid.Value, oKid.Value) {
 				return false
 			}
 
@@ -756,7 +757,7 @@ func (n *BartNode[V]) EqualRec(o *BartNode[V]) bool {
 			}
 
 			// compare values
-			if !Equal(nKid.Value, oKid.Value) {
+			if !value.Equal(nKid.Value, oKid.Value) {
 				return false
 			}
 
@@ -777,30 +778,33 @@ func (n *BartNode[V]) EqualRec(o *BartNode[V]) bool {
 // subnodes). The path slice and depth together represent the byte-wise path
 // from the root to the current node; depth is incremented for each recursion.
 // The is4 flag controls IPv4/IPv6 formatting used by dump.
-func (n *BartNode[V]) DumpRec(w io.Writer, path StridePath, depth int, is4 bool, printVals bool) {
+func (n *BartNode[V]) DumpRec(w io.Writer, path StridePath, depth int, is4 bool) {
 	if n == nil || n.IsEmpty() {
 		return
 	}
 
 	// dump this node
-	n.Dump(w, path, depth, is4, printVals)
+	n.dump(w, path, depth, is4)
 
 	// node may have children, rec-descent down
 	for addr, child := range n.AllChildren() {
 		if kid, ok := child.(*BartNode[V]); ok {
 			path[depth] = addr
-			kid.DumpRec(w, path, depth+1, is4, printVals)
+			kid.DumpRec(w, path, depth+1, is4)
 		}
 	}
 }
 
-// Dump writes a human-readable representation of the node to `w`.
+// dump writes a human-readable representation of the node to `w`.
 // It prints the node type, depth, formatted path (IPv4 vs IPv6 controlled by `is4`),
 // and bit count, followed by any stored prefixes (and their values when applicable),
 // the set of child octets, and any path-compressed leaves or fringe entries.
-func (n *BartNode[V]) Dump(w io.Writer, path StridePath, depth int, is4 bool, printVals bool) {
+func (n *BartNode[V]) dump(w io.Writer, path StridePath, depth int, is4 bool) {
 	bits := depth * strideLen
 	indent := strings.Repeat(".", depth)
+
+	// printing values if V is not zero-sized
+	printValues := !value.IsZST[V]()
 
 	// node type with depth and octet path and bits.
 	fmt.Fprintf(w, "\n%s[%s] depth:  %d path: [%s] / %d\n",
@@ -823,8 +827,8 @@ func (n *BartNode[V]) Dump(w io.Writer, path StridePath, depth int, is4 bool, pr
 
 		fmt.Fprintln(w)
 
-		// skip values, maybe the payload is the empty struct
-		if printVals {
+		// skip printing values if V is zero-sized
+		if printValues {
 
 			// print the values for this node
 			fmt.Fprintf(w, "%svalues(#%d):", indent, nPfxCount)
@@ -838,11 +842,11 @@ func (n *BartNode[V]) Dump(w io.Writer, path StridePath, depth int, is4 bool, pr
 		}
 	}
 
-	if n.ChildCount() != 0 {
-		allAddrs := make([]uint8, 0, MaxItems)
-		childAddrs := make([]uint8, 0, MaxItems)
-		leafAddrs := make([]uint8, 0, MaxItems)
-		fringeAddrs := make([]uint8, 0, MaxItems)
+	if cc := n.ChildCount(); cc != 0 {
+		allAddrs := make([]uint8, 0, cc)
+		childAddrs := make([]uint8, 0, cc)
+		leafAddrs := make([]uint8, 0, cc)
+		fringeAddrs := make([]uint8, 0, cc)
 
 		// the node has recursive child nodes or path-compressed leaves
 		for addr, child := range n.AllChildren() {
@@ -873,7 +877,9 @@ func (n *BartNode[V]) Dump(w io.Writer, path StridePath, depth int, is4 bool, pr
 
 			for _, addr := range leafAddrs {
 				kid := n.MustGetChild(addr).(*LeafNode[V])
-				if printVals {
+
+				// skip printing values if V is zero-sized
+				if printValues {
 					fmt.Fprintf(w, " %s:{%s, %v}", addrFmt(addr, is4), kid.Prefix, kid.Value)
 				} else {
 					fmt.Fprintf(w, " %s:{%s}", addrFmt(addr, is4), kid.Prefix)
@@ -891,7 +897,9 @@ func (n *BartNode[V]) Dump(w io.Writer, path StridePath, depth int, is4 bool, pr
 				fringePfx := CidrForFringe(path[:], depth, is4, addr)
 
 				kid := n.MustGetChild(addr).(*FringeNode[V])
-				if printVals {
+
+				// skip printing values if V is zero-sized
+				if printValues {
 					fmt.Fprintf(w, " %s:{%s, %v}", addrFmt(addr, is4), fringePfx, kid.Value)
 				} else {
 					fmt.Fprintf(w, " %s:{%s}", addrFmt(addr, is4), fringePfx)
@@ -925,10 +933,9 @@ func (n *BartNode[V]) Dump(w io.Writer, path StridePath, depth int, is4 bool, pr
 //   - octets: The path of octets to follow from the root
 //   - depth: Target depth to reach before dumping (0-based byte index)
 //   - is4: True for IPv4 formatting, false for IPv6
-//   - printVals: Whether to include values in the dump output
 //
 // Returns a formatted string representation of the target node or an error message.
-func (n *BartNode[V]) DumpString(octets []uint8, depth int, is4 bool, printVals bool) string {
+func (n *BartNode[V]) DumpString(octets []uint8, depth int, is4 bool) string {
 	path := StridePath{}
 	copy(path[:], octets)
 
@@ -948,7 +955,7 @@ func (n *BartNode[V]) DumpString(octets []uint8, depth int, is4 bool, printVals 
 		n = kid
 	}
 
-	n.Dump(buf, path, depth, is4, printVals)
+	n.dump(buf, path, depth, is4)
 	return buf.String()
 }
 
@@ -1059,7 +1066,7 @@ func (n *BartNode[V]) StatsRec() (s StatsT) {
 // FprintRec recursively prints a hierarchical CIDR tree representation
 // starting from this node to the provided writer. The output shows the
 // routing table structure in human-readable format for debugging and analysis.
-func (n *BartNode[V]) FprintRec(w io.Writer, parent TrieItem[V], pad string, printVals bool) error {
+func (n *BartNode[V]) FprintRec(w io.Writer, parent TrieItem[V], pad string) error {
 	// recursion stop condition
 	if n == nil || n.IsEmpty() {
 		return nil
@@ -1072,6 +1079,9 @@ func (n *BartNode[V]) FprintRec(w io.Writer, parent TrieItem[V], pad string, pri
 	slices.SortFunc(directItems, func(a, b TrieItem[V]) int {
 		return CmpPrefix(a.Cidr, b.Cidr)
 	})
+
+	// printing values if V is not zero-sized
+	printValues := !value.IsZST[V]()
 
 	// for all direct item under this node ...
 	for i, item := range directItems {
@@ -1087,11 +1097,11 @@ func (n *BartNode[V]) FprintRec(w io.Writer, parent TrieItem[V], pad string, pri
 
 		var err error
 		// val is the empty struct, don't print it
-		switch {
-		case !printVals:
-			_, err = fmt.Fprintf(w, "%s%s\n", pad+glyph, item.Cidr)
-		default:
+		if printValues {
 			_, err = fmt.Fprintf(w, "%s%s (%v)\n", pad+glyph, item.Cidr, item.Val)
+		} else {
+			// skip printing values if V is zero-sized
+			_, err = fmt.Fprintf(w, "%s%s\n", pad+glyph, item.Cidr)
 		}
 
 		if err != nil {
@@ -1100,7 +1110,7 @@ func (n *BartNode[V]) FprintRec(w io.Writer, parent TrieItem[V], pad string, pri
 
 		// rec-descent with this item as parent
 		nextNode, _ := item.Node.(*BartNode[V])
-		if err = nextNode.FprintRec(w, item, pad+space, printVals); err != nil {
+		if err = nextNode.FprintRec(w, item, pad+space); err != nil {
 			return err
 		}
 	}
@@ -1111,8 +1121,6 @@ func (n *BartNode[V]) FprintRec(w io.Writer, parent TrieItem[V], pad string, pri
 // DirectItemsRec, returns the direct covered items by parent.
 // It's a complex recursive function, you have to know the data structure
 // by heart to understand this function!
-//
-// See the  artlookup.pdf paper in the doc folder, the baseIndex function is the key.
 func (n *BartNode[V]) DirectItemsRec(parentIdx uint8, path StridePath, depth int, is4 bool) (directItems []TrieItem[V]) {
 	// recursion stop condition
 	if n == nil || n.IsEmpty() {
@@ -1213,9 +1221,9 @@ func (n *BartNode[V]) DirectItemsRec(parentIdx uint8, path StridePath, depth int
 // The merge operation is destructive on the receiver n, but leaves the source node o unchanged.
 //
 // Returns the number of duplicate prefixes that were overwritten during merging.
-func (n *BartNode[V]) UnionRec(cloneFn CloneFunc[V], o *BartNode[V], depth int) (duplicates int) {
+func (n *BartNode[V]) UnionRec(cloneFn value.CloneFunc[V], o *BartNode[V], depth int) (duplicates int) {
 	if cloneFn == nil {
-		cloneFn = copyVal
+		cloneFn = value.CopyVal
 	}
 
 	buf := [256]uint8{}
@@ -1246,9 +1254,9 @@ func (n *BartNode[V]) UnionRec(cloneFn CloneFunc[V], o *BartNode[V], depth int) 
 }
 
 // UnionRecPersist is similar to unionRec but performs an immutable union of nodes.
-func (n *BartNode[V]) UnionRecPersist(cloneFn CloneFunc[V], o *BartNode[V], depth int) (duplicates int) {
+func (n *BartNode[V]) UnionRecPersist(cloneFn value.CloneFunc[V], o *BartNode[V], depth int) (duplicates int) {
 	if cloneFn == nil {
-		cloneFn = copyVal
+		cloneFn = value.CopyVal
 	}
 
 	buf := [256]uint8{}
@@ -1297,7 +1305,7 @@ func (n *BartNode[V]) UnionRecPersist(cloneFn CloneFunc[V], o *BartNode[V], dept
 //	fringe, node    <-- insert new node, push this fringe down, union rec-descent
 //	fringe, leaf    <-- insert new node, push this fringe down, insert other leaf at depth+1
 //	fringe, fringe  <-- just overwrite value
-func (n *BartNode[V]) handleMatrix(cloneFn CloneFunc[V], thisExists bool, thisChild, otherChild any, addr uint8, depth int) int {
+func (n *BartNode[V]) handleMatrix(cloneFn value.CloneFunc[V], thisExists bool, thisChild, otherChild any, addr uint8, depth int) int {
 	// Do ALL type assertions upfront - reduces line noise
 	var (
 		thisNode, thisIsNode     = thisChild.(*BartNode[V])
@@ -1414,7 +1422,7 @@ func (n *BartNode[V]) handleMatrix(cloneFn CloneFunc[V], thisExists bool, thisCh
 //	fringe, node    <-- insert new node, push this fringe down, union rec-descent
 //	fringe, leaf    <-- insert new node, push this fringe down, insert other leaf at depth+1
 //	fringe, fringe  <-- just overwrite value
-func (n *BartNode[V]) handleMatrixPersist(cloneFn CloneFunc[V], thisExists bool, thisChild, otherChild any, addr uint8, depth int) int {
+func (n *BartNode[V]) handleMatrixPersist(cloneFn value.CloneFunc[V], thisExists bool, thisChild, otherChild any, addr uint8, depth int) int {
 	// Do ALL type assertions upfront - reduces line noise
 	var (
 		thisNode, thisIsNode     = thisChild.(*BartNode[V])

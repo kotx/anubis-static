@@ -9,6 +9,7 @@ import (
 
 	"github.com/TecharoHQ/anubis/internal/dns"
 	"github.com/TecharoHQ/anubis/lib/store/memory"
+	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 )
@@ -103,7 +104,7 @@ func TestBotEnvironment(t *testing.T) {
 					t.Fatalf("failed to compile expression %q: %v", tt.expression, err)
 				}
 
-				result, _, err := prog.Eval(map[string]interface{}{
+				result, _, err := prog.Eval(map[string]any{
 					"headers": tt.headers,
 				})
 				if err != nil {
@@ -168,7 +169,7 @@ func TestBotEnvironment(t *testing.T) {
 					t.Fatalf("failed to compile expression %q: %v", tt.expression, err)
 				}
 
-				result, _, err := prog.Eval(map[string]interface{}{
+				result, _, err := prog.Eval(map[string]any{
 					"path": tt.path,
 				})
 				if err != nil {
@@ -280,7 +281,7 @@ func TestBotEnvironment(t *testing.T) {
 					t.Fatalf("failed to compile expression %q: %v", tt.expression, err)
 				}
 
-				result, _, err := prog.Eval(map[string]interface{}{})
+				result, _, err := prog.Eval(map[string]any{})
 				if err != nil {
 					t.Fatalf("failed to evaluate expression %q: %v", tt.expression, err)
 				}
@@ -359,7 +360,7 @@ func TestBotEnvironment(t *testing.T) {
 						t.Fatalf("failed to compile expression %q: %v", tt.expression, err)
 					}
 
-					result, _, err := prog.Eval(map[string]interface{}{})
+					result, _, err := prog.Eval(map[string]any{})
 					if err != nil {
 						t.Fatalf("failed to evaluate expression %q: %v", tt.expression, err)
 					}
@@ -421,7 +422,7 @@ func TestBotEnvironment(t *testing.T) {
 						t.Fatalf("failed to compile expression %q: %v", tt.expression, err)
 					}
 
-					result, _, err := prog.Eval(map[string]interface{}{})
+					result, _, err := prog.Eval(map[string]any{})
 					if err != nil {
 						t.Fatalf("failed to evaluate expression %q: %v", tt.expression, err)
 					}
@@ -514,7 +515,7 @@ func TestBotEnvironment(t *testing.T) {
 						t.Fatalf("failed to compile expression %q: %v", tt.expression, err)
 					}
 
-					result, _, err := prog.Eval(map[string]interface{}{})
+					result, _, err := prog.Eval(map[string]any{})
 					if err != nil {
 						t.Fatalf("failed to evaluate expression %q: %v", tt.expression, err)
 					}
@@ -572,7 +573,7 @@ func TestBotEnvironment(t *testing.T) {
 						t.Fatalf("failed to compile expression %q: %v", tt.expression, err)
 					}
 
-					result, _, err := prog.Eval(map[string]interface{}{})
+					result, _, err := prog.Eval(map[string]any{})
 					if tt.evalError {
 						if err == nil {
 							t.Errorf("%s: expected an evaluation error, but got none", tt.description)
@@ -598,7 +599,7 @@ func TestThresholdEnvironment(t *testing.T) {
 	}
 
 	tests := []struct {
-		variables     map[string]interface{}
+		variables     map[string]any
 		name          string
 		expression    string
 		description   string
@@ -608,7 +609,7 @@ func TestThresholdEnvironment(t *testing.T) {
 		{
 			name:          "weight-variable-available",
 			expression:    `weight > 100`,
-			variables:     map[string]interface{}{"weight": 150},
+			variables:     map[string]any{"weight": 150},
 			expected:      types.Bool(true),
 			description:   "should support weight variable in expressions",
 			shouldCompile: true,
@@ -616,7 +617,7 @@ func TestThresholdEnvironment(t *testing.T) {
 		{
 			name:          "weight-variable-false-case",
 			expression:    `weight > 100`,
-			variables:     map[string]interface{}{"weight": 50},
+			variables:     map[string]any{"weight": 50},
 			expected:      types.Bool(false),
 			description:   "should correctly evaluate weight comparisons",
 			shouldCompile: true,
@@ -624,7 +625,7 @@ func TestThresholdEnvironment(t *testing.T) {
 		{
 			name:          "missingHeader-not-available",
 			expression:    `missingHeader(headers, "Test")`,
-			variables:     map[string]interface{}{},
+			variables:     map[string]any{},
 			expected:      types.Bool(false), // not used
 			description:   "should not have missingHeader function available",
 			shouldCompile: false,
@@ -667,7 +668,7 @@ func TestNewEnvironment(t *testing.T) {
 	tests := []struct {
 		name          string
 		expression    string
-		variables     map[string]interface{}
+		variables     map[string]any
 		expectBool    *bool // nil if we just want to test compilation or non-bool result
 		description   string
 		shouldCompile bool
@@ -675,7 +676,7 @@ func TestNewEnvironment(t *testing.T) {
 		{
 			name:          "randInt-function-compilation",
 			expression:    `randInt(10)`,
-			variables:     map[string]interface{}{},
+			variables:     map[string]any{},
 			expectBool:    nil, // Don't check result, just compilation
 			description:   "should compile randInt function",
 			shouldCompile: true,
@@ -683,15 +684,23 @@ func TestNewEnvironment(t *testing.T) {
 		{
 			name:          "randInt-range-validation",
 			expression:    `randInt(10) >= 0 && randInt(10) < 10`,
-			variables:     map[string]interface{}{},
+			variables:     map[string]any{},
 			expectBool:    boolPtr(true),
 			description:   "should return values in correct range",
 			shouldCompile: true,
 		},
 		{
+			name:          "randInt-large-bound",
+			expression:    `randInt(2147483647) >= 0`,
+			variables:     map[string]any{},
+			expectBool:    boolPtr(true),
+			description:   "should accept int32-max bounds without overflow",
+			shouldCompile: true,
+		},
+		{
 			name:          "strings-extension-size",
 			expression:    `"hello".size() == 5`,
-			variables:     map[string]interface{}{},
+			variables:     map[string]any{},
 			expectBool:    boolPtr(true),
 			description:   "should support string extension functions",
 			shouldCompile: true,
@@ -699,7 +708,7 @@ func TestNewEnvironment(t *testing.T) {
 		{
 			name:          "strings-extension-contains",
 			expression:    `"hello world".contains("world")`,
-			variables:     map[string]interface{}{},
+			variables:     map[string]any{},
 			expectBool:    boolPtr(true),
 			description:   "should support string contains function",
 			shouldCompile: true,
@@ -707,7 +716,7 @@ func TestNewEnvironment(t *testing.T) {
 		{
 			name:          "strings-extension-startsWith",
 			expression:    `"hello world".startsWith("hello")`,
-			variables:     map[string]interface{}{},
+			variables:     map[string]any{},
 			expectBool:    boolPtr(true),
 			description:   "should support string startsWith function",
 			shouldCompile: true,
@@ -749,4 +758,66 @@ func TestNewEnvironment(t *testing.T) {
 // Helper function to create bool pointers
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+func TestRandIntInvalidBounds(t *testing.T) {
+	env, err := New(cel.Variable("contentLength", cel.IntType))
+	if err != nil {
+		t.Fatalf("failed to create environment: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		expression  string
+		variables   map[string]any
+		wantErrText string
+		description string
+	}{
+		{
+			name:        "zero-bound-literal",
+			expression:  `randInt(0)`,
+			variables:   map[string]any{},
+			wantErrText: "randInt bound must be positive",
+			description: "randInt(0) should return a CEL error, not panic",
+		},
+		{
+			name:        "negative-bound-literal",
+			expression:  `randInt(-5)`,
+			variables:   map[string]any{},
+			wantErrText: "randInt bound must be positive",
+			description: "randInt(-5) should return a CEL error, not panic",
+		},
+		{
+			name:        "zero-bound-from-variable",
+			expression:  `randInt(contentLength)`,
+			variables:   map[string]any{"contentLength": 0},
+			wantErrText: "randInt bound must be positive",
+			description: "attacker-controlled zero contentLength should error gracefully",
+		},
+		{
+			name:        "negative-bound-from-variable",
+			expression:  `randInt(contentLength)`,
+			variables:   map[string]any{"contentLength": -1},
+			wantErrText: "randInt bound must be positive",
+			description: "attacker-controlled negative contentLength should error gracefully",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prog, err := Compile(env, tt.expression)
+			if err != nil {
+				t.Fatalf("failed to compile expression %q: %v", tt.expression, err)
+			}
+
+			result, _, err := prog.Eval(tt.variables)
+			if err == nil {
+				t.Fatalf("%s: expected an evaluation error, got result %v", tt.description, result)
+			}
+
+			if !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Errorf("%s: expected error containing %q, got %q", tt.description, tt.wantErrText, err.Error())
+			}
+		})
+	}
 }

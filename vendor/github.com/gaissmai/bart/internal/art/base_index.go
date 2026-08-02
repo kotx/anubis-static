@@ -10,9 +10,6 @@
 //	can inline OctetToIdx with cost 5
 //	can inline PfxBits with cost 21
 //	can inline PfxToIdx with cost 17
-//
-// Please read the ART paper ./doc/artlookup.pdf
-// to understand the baseIndex algorithm.
 package art
 
 import "math/bits"
@@ -40,9 +37,19 @@ func PfxToIdx(octet, pfxLen uint8) uint8 {
 	return octet>>(8-pfxLen) + 1<<pfxLen
 }
 
-// OctetToIdx maps octet/8 prefixes to numbers in the range [128..255].
+// OctetToIdx maps octet/8 prefixes from [256..511] => [128..255] to start
+// with the parent (>>1) in the complete binary tree.
+//
+// Same formula as PfxToIdx, but for octet/8 and a shift (>>1).
+//
+//	octet>>(8-pfxLen) + 1<<pfxLen
+//	     octet>>(8-8) + 1<<8
+//	            octet + 256
+//
+//	got to parent idx:
+//	    (octet+256)>>1 == octet>>1 + 128
 func OctetToIdx(octet uint8) uint8 {
-	return 128 + octet>>1
+	return octet>>1 + 128
 }
 
 // IdxToPfx returns the octet and prefix len of baseIdx.

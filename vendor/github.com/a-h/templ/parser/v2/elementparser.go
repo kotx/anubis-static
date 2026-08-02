@@ -45,6 +45,15 @@ var elementOpenTagParser = parse.Func(func(pi *parse.Input) (e elementOpenTag, m
 	if pi.Position().Line != l {
 		e.IndentAttrs = true
 	}
+	// Conditional attributes are always multi-line when formatted, so indent all attributes.
+	if !e.IndentAttrs {
+		for _, a := range e.Attributes {
+			if _, ok := a.(*ConditionalAttribute); ok {
+				e.IndentAttrs = true
+				break
+			}
+		}
+	}
 
 	// Optional whitespace.
 	if _, _, err = parse.OptionalWhitespace.Parse(pi); err != nil {
@@ -103,20 +112,23 @@ type attributeValueParser struct {
 	UseSingleQuote bool
 }
 
-func (avp attributeValueParser) Parse(pi *parse.Input) (value string, ok bool, err error) {
+func (avp attributeValueParser) Parse(pi *parse.Input) (value string, valueRange Range, ok bool, err error) {
 	start := pi.Index()
 	if _, ok, err = avp.EqualsAndQuote.Parse(pi); err != nil || !ok {
 		return
 	}
+	valueStart := pi.Index()
 	if value, ok, err = parse.StringUntil(avp.Suffix).Parse(pi); err != nil || !ok {
 		pi.Seek(start)
 		return
 	}
+	valueEnd := pi.Index()
+	valueRange = NewRange(pi.PositionAt(valueStart), pi.PositionAt(valueEnd))
 	if _, ok, err = avp.Suffix.Parse(pi); err != nil || !ok {
 		pi.Seek(start)
 		return
 	}
-	return value, true, nil
+	return value, valueRange, true, nil
 }
 
 // Constant attribute.
@@ -139,6 +151,7 @@ var (
 			return
 		}
 
+		attrStart := pi.Index()
 		attr = &ConstantAttribute{}
 
 		// Attribute name.
@@ -148,7 +161,8 @@ var (
 		}
 
 		for _, p := range attributeValueParsers {
-			attr.Value, ok, err = p.Parse(pi)
+			var valueRange Range
+			attr.Value, valueRange, ok, err = p.Parse(pi)
 			if err != nil {
 				pos := pi.Position()
 				if pErr, isParseError := err.(parse.ParseError); isParseError {
@@ -158,6 +172,7 @@ var (
 			}
 			if ok {
 				attr.SingleQuote = p.UseSingleQuote
+				attr.ValueRange = valueRange
 				break
 			}
 		}
@@ -169,6 +184,7 @@ var (
 
 		// Only use single quotes if actually required, due to double quote in the value (prefer double quotes).
 		attr.SingleQuote = attr.SingleQuote && strings.Contains(attr.Value, "\"")
+		attr.Range = NewRange(pi.PositionAt(attrStart), pi.Position())
 
 		return attr, true, nil
 	})
@@ -220,6 +236,7 @@ var boolConstantAttributeParser = parse.Func(func(pi *parse.Input) (attr *BoolCo
 		return
 	}
 
+	attrStart := pi.Index()
 	attr = &BoolConstantAttribute{}
 
 	// Attribute name.
@@ -243,6 +260,7 @@ var boolConstantAttributeParser = parse.Func(func(pi *parse.Input) (attr *BoolCo
 		err = parse.Error(fmt.Sprintf("boolConstantAttributeParser: expected attribute name to end with space, newline, '/>' or '>', but got %q", next), pi.Position())
 		return attr, false, err
 	}
+	attr.Range = NewRange(pi.PositionAt(attrStart), pi.Position())
 
 	return attr, true, nil
 })
@@ -259,6 +277,7 @@ var boolExpressionAttributeParser = parse.Func(func(pi *parse.Input) (r *BoolExp
 		return
 	}
 
+	attrStart := pi.Index()
 	r = &BoolExpressionAttribute{}
 
 	// Attribute name.
@@ -284,11 +303,10 @@ var boolExpressionAttributeParser = parse.Func(func(pi *parse.Input) (r *BoolExp
 		pi.Seek(start)
 		return
 	}
+	r.Range = NewRange(pi.PositionAt(attrStart), pi.Position())
 
 	return r, true, nil
 })
-
-var expressionAttributeStartParser = parse.StringFrom(parse.OptionalWhitespace, parse.String("="), parse.OptionalWhitespace, parse.String("{"), parse.OptionalWhitespace)
 
 var expressionAttributeParser = parse.Func(func(pi *parse.Input) (attr *ExpressionAttribute, ok bool, err error) {
 	start := pi.Index()
@@ -298,6 +316,7 @@ var expressionAttributeParser = parse.Func(func(pi *parse.Input) (attr *Expressi
 		return
 	}
 
+	attrStart := pi.Index()
 	attr = &ExpressionAttribute{}
 
 	// Attribute name.
@@ -306,10 +325,30 @@ var expressionAttributeParser = parse.Func(func(pi *parse.Input) (attr *Expressi
 		return
 	}
 
-	// ={
-	if _, ok, err = expressionAttributeStartParser.Parse(pi); err != nil || !ok {
+	if _, _, err = parse.OptionalWhitespace.Parse(pi); err != nil {
 		pi.Seek(start)
-		return
+		return attr, false, err
+	}
+
+	initializerStartIndex := pi.Index()
+	if _, ok, err = parse.String("=").Parse(pi); err != nil || !ok {
+		pi.Seek(start)
+		return attr, false, nil
+	}
+
+	if _, _, err = parse.OptionalWhitespace.Parse(pi); err != nil {
+		pi.Seek(start)
+		return attr, false, err
+	}
+
+	if _, ok, err = openBrace.Parse(pi); err != nil || !ok {
+		pi.Seek(start)
+		return attr, false, nil
+	}
+
+	if _, _, err = parse.OptionalWhitespace.Parse(pi); err != nil {
+		pi.Seek(start)
+		return attr, false, err
 	}
 
 	// Expression.
@@ -325,6 +364,10 @@ var expressionAttributeParser = parse.Func(func(pi *parse.Input) (attr *Expressi
 		err = parse.Error("string expression attribute: missing closing brace", pi.Position())
 		return
 	}
+	initializerEndIndex := pi.Index()
+	attr.AttributeStartRange = NewRange(pi.PositionAt(initializerStartIndex), pi.PositionAt(initializerEndIndex))
+
+	attr.Range = NewRange(pi.PositionAt(attrStart), pi.Position())
 
 	return attr, true, nil
 })
@@ -337,6 +380,7 @@ var spreadAttributesParser = parse.Func(func(pi *parse.Input) (attr *SpreadAttri
 		return
 	}
 
+	attrStart := pi.Index()
 	// Eat the first brace.
 	if _, ok, err = openBraceWithOptionalPadding.Parse(pi); err != nil ||
 		!ok {
@@ -367,6 +411,7 @@ var spreadAttributesParser = parse.Func(func(pi *parse.Input) (attr *SpreadAttri
 		err = parse.Error("attribute spread expression: missing closing brace", pi.Position())
 		return
 	}
+	attr.Range = NewRange(pi.PositionAt(attrStart), pi.Position())
 
 	return attr, true, nil
 })

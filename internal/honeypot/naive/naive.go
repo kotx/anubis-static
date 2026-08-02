@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"net/netip"
@@ -76,34 +77,27 @@ type Impl struct {
 	affirmation, body, title spintax.Spintax
 }
 
-func (i *Impl) incrementUA(ctx context.Context, userAgent string) int {
-	result, _ := i.uaWeight.Get(ctx, internal.SHA256sum(userAgent))
-	result++
-	i.uaWeight.Set(ctx, internal.SHA256sum(userAgent), result, time.Hour)
-	return result
-}
-
 func (i *Impl) incrementNetwork(ctx context.Context, network string) int {
-	result, _ := i.networkWeight.Get(ctx, internal.SHA256sum(network))
+	key := internal.SHA256sum(network)
+	result, _ := i.networkWeight.Get(ctx, key)
 	result++
-	i.networkWeight.Set(ctx, internal.SHA256sum(network), result, time.Hour)
+	_ = i.networkWeight.Set(ctx, key, result, time.Hour)
 	return result
-}
-
-func (i *Impl) CheckUA() checker.Impl {
-	return checker.Func(func(r *http.Request) (bool, error) {
-		result, _ := i.uaWeight.Get(r.Context(), internal.SHA256sum(r.UserAgent()))
-		if result >= 25 {
-			return true, nil
-		}
-
-		return false, nil
-	})
 }
 
 func (i *Impl) CheckNetwork() checker.Impl {
 	return checker.Func(func(r *http.Request) (bool, error) {
-		result, _ := i.uaWeight.Get(r.Context(), internal.SHA256sum(r.UserAgent()))
+		realIP, _ := internal.RealIP(r)
+		if !realIP.IsValid() {
+			realIP = netip.MustParseAddr(r.Header.Get("X-Real-Ip"))
+		}
+
+		network, ok := internal.ClampIP(realIP)
+		if !ok {
+			return false, nil
+		}
+
+		result, _ := i.networkWeight.Get(r.Context(), internal.SHA256sum(network.String()))
 		if result >= 25 {
 			return true, nil
 		}
@@ -120,7 +114,7 @@ func (i *Impl) makeAffirmations() []string {
 	count := rand.IntN(5) + 1
 
 	var result []string
-	for j := 0; j < count; j++ {
+	for range count {
 		result = append(result, i.affirmation.Spin())
 	}
 
@@ -131,7 +125,7 @@ func (i *Impl) makeSpins() []string {
 	count := rand.IntN(5) + 1
 
 	var result []string
-	for j := 0; j < count; j++ {
+	for range count {
 		result = append(result, i.body.Spin())
 	}
 
@@ -158,24 +152,26 @@ func (i *Impl) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	network, ok := internal.ClampIP(realIP)
 	if !ok {
-		lg.Error("clampIP failed", "output", network, "ok", ok)
+		lg.ErrorContext(r.Context(), "clampIP failed", "output", network, "ok", ok)
 		http.Error(w, "The cake is a lie", http.StatusTeapot)
 		return
 	}
 
 	networkCount := i.incrementNetwork(r.Context(), network.String())
-	uaCount := i.incrementUA(r.Context(), r.UserAgent())
 
 	stage := r.PathValue("stage")
 
 	if stage == "init" {
-		lg.Debug("found new entrance point", "id", id, "stage", stage, "userAgent", r.UserAgent(), "clampedIP", network)
+		lg.DebugContext(r.Context(), "found new entrance point", "id", id, "stage", stage, "userAgent", r.UserAgent(), "clampedIP", network)
 	} else {
-		switch {
-		case networkCount%256 == 0, uaCount%256 == 0:
-			lg.Warn("found possible crawler", "id", id, "network", network)
+		switch networkCount % 256 {
+		case 0:
+			lg.WarnContext(r.Context(), "found possible crawler", "id", id, "network", network, "userAgent", r.UserAgent())
 		}
 	}
+
+	millisecondAmount := min(math.Pow(float64(networkCount), 2), 1000)
+	time.Sleep(time.Duration(millisecondAmount) * time.Millisecond)
 
 	spins := i.makeSpins()
 	affirmations := i.makeAffirmations()

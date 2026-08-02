@@ -21,6 +21,9 @@ linters:
     - copyloopvar
     - tparallel
     - gochecknoglobals
+    - nolintlint
+    - modernize
+    - gocritic
   settings:
     govet:
       enable:
@@ -31,11 +34,13 @@ linters:
       excludes:
         - G404             # deterministic RNG in tests/benchmarks only
   exclusions:
-    rules:
-      - path: '(.+)_test\.go'
-        linters:
-          - gochecknoglobals
     generated: lax
+    rules:
+      - linters:
+          - gochecknoglobals
+          - gosec
+          - gocyclo
+        path: _test\.go
     presets:
       - comments
       - common-false-positives

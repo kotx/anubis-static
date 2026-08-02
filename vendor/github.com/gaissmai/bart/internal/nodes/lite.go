@@ -9,61 +9,29 @@ import (
 	"github.com/gaissmai/bart/internal/bitset"
 	"github.com/gaissmai/bart/internal/lpm"
 	"github.com/gaissmai/bart/internal/sparse"
+	"github.com/gaissmai/bart/internal/value"
 )
 
-// LiteNode is the core building block of the slimmed-down BART trie.
+// LiteNode is a trie level node in the multibit routing table.
 //
-// Each LiteNode represents one stride (8 bits) of the address space and stores
-// both routing prefixes and child pointers for further trie traversal. It is
-// designed as a memory-efficient alternative to classic ART-style nodes,
-// using compact bitsets and sparse arrays instead of full lookup tables.
+// Each LiteNode contains two conceptually different bitset-based arrays:
+//   - Prefixes: a BitSet256 tracking which prefix indices are occupied,
+//     with Count tracking the number of active entries.
+//   - Children: holding subtries or path-compressed leaves/fringes with
+//     a branching factor of 256 (8 bits per stride).
 //
-// A LiteNode has two main responsibilities:
-//   - **Prefix storage**: Up to 256 possible prefixes (one per stride index) are
-//     managed in a BitSet (prefixes). Lookups use longest-prefix match (LPM)
-//     via backtracking along the complete binary tree (CBT) encoded in this bitset.
-//   - **Child management**: Child pointers are held in a sparse-array of at most
-//     256 entries. A child can be another *LiteNode[V] for further traversal, or
-//     a path-compressed terminal node: *LeafNode (explicit prefix storage)
-//     or *FringeNode (implicit prefix at stride boundary).
+// Entries in Children may be:
+//   - *LiteNode[V]   -> internal child node for further traversal
+//   - *LeafNode[V]   -> path-comp. node (depth < maxDepth - 1)
+//   - *FringeNode[V] -> path-comp. node (depth == maxDepth - 1, stride-aligned)
 //
-// Fields:
-//   - prefixes: BitSet256 indicating which prefix indices are occupied.
-//   - children: Sparse array holding subnodes or compressed leaf/fringe nodes.
-//   - pfxCount: Number of prefix entries actually stored in this node.
-//
-// Invariants:
-//   - pfxCount always matches the number of set bits in prefixes.
-//   - children only contains entries at addresses (0–255) explicitly present.
-//   - Node emptiness (no prefixes and no children) implies a candidate for removal.
-//
-// Generic design note:
-//
-//	LiteNode is *pseudo-generic*: the type parameter V does not occur in the
-//	struct fields itself. Instead, it is a **phantom type** used solely to make
-//	LiteNode[V] satisfy the generic interface nodeReadWriter[V].
-//	This allows LiteNode, fastNode, and node to be interchangeable under the
-//	same interface abstraction, enabling generic algorithms for insertion,
-//	lookup, dumping, and traversal, regardless of the internal representation.
-//	The compiler enforces type correctness at the interface boundary, while
-//	the internal layout of LiteNode stays lean (no value payloads).
-//
-// Memory model:
-//   - Prefix presence is tracked only via bitset (values are not stored directly).
-//   - No values are stored; lite tracks presence only.
-//   - LiteNode acts solely as the internal routing structure.
-//
-// Usage notes:
-//   - Routing insertions place prefixes either into the prefix table (if aligned)
-//     or into compressed child nodes (leaf/fringe).
-//   - Lookup/contains use the precomputed CBT-backtracking bitset (lpm.LookupTbl)
-//     for fast longest-prefix match within stride.
-//   - purgeAndCompress reclaims empty / sparse nodes on unwind to keep the trie compact.
+// Note: The type parameter V is a phantom type used solely for common
+// method generation; LiteNode stores no values.
 type LiteNode[V any] struct {
 	Children sparse.Array256[any]
 	Prefixes struct {
-		bitset.BitSet256
 		// no values
+		bitset.BitSet256
 		Count uint16
 	}
 }
@@ -89,7 +57,7 @@ func (n *LiteNode[V]) ChildCount() int {
 }
 
 // InsertPrefix adds a routing entry at the specified index.
-// It returns true if a prefix already existed at that index
+// It returns true if a prefix already existed at that index,
 // false if this is a new insertion.
 func (n *LiteNode[V]) InsertPrefix(idx uint8, _ V) (exists bool) {
 	if exists = n.Prefixes.Test(idx); exists {
@@ -100,13 +68,14 @@ func (n *LiteNode[V]) InsertPrefix(idx uint8, _ V) (exists bool) {
 	return exists
 }
 
-// prefix is set at the given index.
 func (n *LiteNode[V]) GetPrefix(idx uint8) (_ V, exists bool) {
+	// no docstring by intention
 	exists = n.Prefixes.Test(idx)
 	return
 }
 
 func (n *LiteNode[V]) MustGetPrefix(idx uint8) (_ V) {
+	// no docstring by intention
 	return
 }
 
@@ -139,7 +108,8 @@ func (n *LiteNode[V]) DeletePrefix(idx uint8) (exists bool) {
 // The child can be a *LiteNode[V], *LeafNode, or *FringeNode.
 // Returns true if a child already existed at that address.
 func (n *LiteNode[V]) InsertChild(addr uint8, child any) (exists bool) {
-	return n.Children.InsertAt(addr, child)
+	_, exists = n.Children.InsertAt(addr, child)
+	return
 }
 
 // GetChild retrieves the child node at the specified address.
@@ -161,8 +131,7 @@ func (n *LiteNode[V]) AllChildren() iter.Seq2[uint8, any] {
 		var buf [256]uint8
 		addrs := n.Children.AsSlice(&buf)
 		for i, addr := range addrs {
-			child := n.Children.Items[i]
-			if !yield(addr, child) {
+			if !yield(addr, n.Children.Items[i]) {
 				return
 			}
 		}
@@ -203,7 +172,7 @@ func (n *LiteNode[V]) LookupIdx(idx uint8) (top uint8, _ V, ok bool) {
 	return
 }
 
-// Lookup is just a simple wrapper for lookupIdx.
+// Lookup is just a simple wrapper for LookupIdx.
 func (n *LiteNode[V]) Lookup(idx uint8) (_ V, ok bool) {
 	_, _, ok = n.LookupIdx(idx)
 	return
@@ -212,7 +181,7 @@ func (n *LiteNode[V]) Lookup(idx uint8) (_ V, ok bool) {
 // CloneFlat returns a shallow copy of the current node.
 //
 // CloneFn is only used for interface satisfaction.
-func (n *LiteNode[V]) CloneFlat(_ CloneFunc[V]) *LiteNode[V] {
+func (n *LiteNode[V]) CloneFlat(_ value.CloneFunc[V]) *LiteNode[V] {
 	if n == nil {
 		return nil
 	}
@@ -245,7 +214,7 @@ func (n *LiteNode[V]) CloneFlat(_ CloneFunc[V]) *LiteNode[V] {
 //
 // Returns a new instance of LiteNode[V] which is a complete deep clone of the
 // receiver node with all descendants.
-func (n *LiteNode[V]) CloneRec(_ CloneFunc[V]) *LiteNode[V] {
+func (n *LiteNode[V]) CloneRec(_ value.CloneFunc[V]) *LiteNode[V] {
 	if n == nil {
 		return nil
 	}

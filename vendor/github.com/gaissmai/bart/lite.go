@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Karl Gaissmaier
+// Copyright (c) 2026 Karl Gaissmaier
 // SPDX-License-Identifier: MIT
 
 package bart
@@ -21,6 +21,7 @@ import (
 // The zero value is ready to use.
 //
 // A Lite table must not be copied by value; always pass by pointer.
+// Nil pointers as receivers or arguments are forbidden and will panic.
 //
 // Performance note: Do not pass IPv4-in-IPv6 addresses (e.g., ::ffff:192.0.2.1)
 // as input. The methods do not perform automatic unmapping to avoid unnecessary
@@ -73,7 +74,7 @@ func (l *Lite) LookupPrefix(pfx netip.Prefix) bool {
 // match any address in the provided prefix range.
 //
 // This is functionally identical to LookupPrefix but returns the
-// matching prefix (lpmPfx) itself.
+// matching LPM prefix itself.
 //
 // This method is slower than LookupPrefix and should only be used if the
 // matching lpm entry is also required for other reasons.
@@ -132,8 +133,8 @@ func (l *Lite) DeletePersist(pfx netip.Prefix) *Lite {
 	return &Lite{*lp}
 }
 
-// Modify applies an insert, update, or delete operation for the given
-// prefix.
+// Modify applies an insert, update, or delete for the given prefix.
+// The prefix is canonicalized (Masked) internally before the operation.
 // The operation is determined by the callback function, which is called with:
 //
 //	true:  the prefix is in table
@@ -185,9 +186,6 @@ func dropSeq2[V any](seq2 iter.Seq2[netip.Prefix, V]) iter.Seq[netip.Prefix] {
 
 // Clone returns a copy of the routing table.
 func (l *Lite) Clone() *Lite {
-	if l == nil {
-		return nil
-	}
 	return &Lite{*l.liteTable.Clone()}
 }
 
@@ -195,22 +193,19 @@ func (l *Lite) Clone() *Lite {
 //
 // All prefixes from the other table (o) are inserted into the receiver.
 func (l *Lite) Union(o *Lite) {
-	if o == nil {
-		return
-	}
 	l.liteTable.Union(&o.liteTable)
 }
 
 // UnionPersist is similar to [Union] but the receiver isn't modified.
 //
 // All nodes touched during union are cloned and a new *Lite is returned.
-// If o is nil or empty, no nodes are touched and the receiver may be
+// If o is empty, no nodes are touched and the receiver may be
 // returned unchanged.
 func (l *Lite) UnionPersist(o *Lite) *Lite {
-	if o == nil || (o.size4 == 0 && o.size6 == 0) {
+	lp := l.liteTable.UnionPersist(&o.liteTable)
+	if lp == &l.liteTable {
 		return l
 	}
-	lp := l.liteTable.UnionPersist(&o.liteTable)
 	//nolint:govet // copy of *lp is here by intention
 	return &Lite{*lp}
 }
@@ -242,25 +237,16 @@ func (l *Lite) UnionPersist(o *Lite) *Lite {
 // 	}
 
 func (l *Lite) All() iter.Seq[netip.Prefix] {
-	if l == nil {
-		return func(func(netip.Prefix) bool) {}
-	}
 	return dropSeq2(l.liteTable.All())
 }
 
 // All4 is like [Lite.All] but only for the v4 routing table.
 func (l *Lite) All4() iter.Seq[netip.Prefix] {
-	if l == nil {
-		return func(func(netip.Prefix) bool) {}
-	}
 	return dropSeq2(l.liteTable.All4())
 }
 
 // All6 is like [Lite.All] but only for the v6 routing table.
 func (l *Lite) All6() iter.Seq[netip.Prefix] {
-	if l == nil {
-		return func(func(netip.Prefix) bool) {}
-	}
 	return dropSeq2(l.liteTable.All6())
 }
 
@@ -282,25 +268,16 @@ func (l *Lite) All6() iter.Seq[netip.Prefix] {
 // prematurely terminate the iteration. If mutation of the table during
 // traversal is required use persistent table methods.
 func (l *Lite) AllSorted() iter.Seq[netip.Prefix] {
-	if l == nil {
-		return func(func(netip.Prefix) bool) {}
-	}
 	return dropSeq2(l.liteTable.AllSorted())
 }
 
 // AllSorted4 is like [Lite.AllSorted] but only for the v4 routing table.
 func (l *Lite) AllSorted4() iter.Seq[netip.Prefix] {
-	if l == nil {
-		return func(func(netip.Prefix) bool) {}
-	}
 	return dropSeq2(l.liteTable.AllSorted4())
 }
 
 // AllSorted6 is like [Lite.AllSorted] but only for the v6 routing table.
 func (l *Lite) AllSorted6() iter.Seq[netip.Prefix] {
-	if l == nil {
-		return func(func(netip.Prefix) bool) {}
-	}
 	return dropSeq2(l.liteTable.AllSorted6())
 }
 
@@ -318,9 +295,6 @@ func (l *Lite) AllSorted6() iter.Seq[netip.Prefix] {
 // The iteration can be stopped early by breaking from the range loop.
 // Returns an empty iterator if the prefix is invalid.
 func (l *Lite) Subnets(pfx netip.Prefix) iter.Seq[netip.Prefix] {
-	if l == nil {
-		return func(func(netip.Prefix) bool) {}
-	}
 	return dropSeq2(l.liteTable.Subnets(pfx))
 }
 
@@ -345,9 +319,6 @@ func (l *Lite) Subnets(pfx netip.Prefix) iter.Seq[netip.Prefix] {
 //	    fmt.Println("Matched covering route:", supernet)
 //	}
 func (l *Lite) Supernets(pfx netip.Prefix) iter.Seq[netip.Prefix] {
-	if l == nil {
-		return func(func(netip.Prefix) bool) {}
-	}
 	return dropSeq2(l.liteTable.Supernets(pfx))
 }
 
@@ -367,53 +338,37 @@ func (l *Lite) Supernets(pfx netip.Prefix) iter.Seq[netip.Prefix] {
 // It is intentionally not nil-receiver safe: calling with a nil
 // receiver will panic by design.
 func (l *Lite) Overlaps(o *Lite) bool {
-	if o == nil {
-		return false
-	}
 	return l.liteTable.Overlaps(&o.liteTable)
 }
 
 // Overlaps4 is like [Lite.Overlaps] but for the v4 routing table only.
 func (l *Lite) Overlaps4(o *Lite) bool {
-	if o == nil {
-		return false
-	}
 	return l.liteTable.Overlaps4(&o.liteTable)
 }
 
 // Overlaps6 is like [Lite.Overlaps] but for the v6 routing table only.
 func (l *Lite) Overlaps6(o *Lite) bool {
-	if o == nil {
-		return false
-	}
 	return l.liteTable.Overlaps6(&o.liteTable)
 }
 
 // Equal checks whether two tables are structurally and semantically equal.
 // It ensures both trees (IPv4-based and IPv6-based) have the same sizes and
 // recursively compares their root nodes.
+//
+// Note: Lite has no payload values, so this only checks structural equality.
 func (l *Lite) Equal(o *Lite) bool {
-	if o == nil || l.size4 != o.size4 || l.size6 != o.size6 {
-		return false
-	}
 	return l.liteTable.Equal(&o.liteTable)
 }
 
 // DumpList4 dumps the ipv4 tree into a list of roots and their subnets.
 // It can be used to analyze the tree or build the text or JSON serialization.
 func (l *Lite) DumpList4() []DumpListNode[struct{}] {
-	if l == nil {
-		return nil
-	}
 	return l.liteTable.DumpList4()
 }
 
 // DumpList6 dumps the ipv6 tree into a list of roots and their subnets.
 // It can be used to analyze the tree or build custom JSON representation.
 func (l *Lite) DumpList6() []DumpListNode[struct{}] {
-	if l == nil {
-		return nil
-	}
 	return l.liteTable.DumpList6()
 }
 
@@ -440,27 +395,18 @@ func (l *Lite) DumpList6() []DumpListNode[struct{}] {
 //	   │  └─ 2001:db8::/32 (V)
 //	   └─ fe80::/10 (V)
 func (l *Lite) Fprint(w io.Writer) error {
-	if l == nil {
-		return nil
-	}
 	return l.liteTable.Fprint(w)
 }
 
 // MarshalJSON dumps the table into two sorted lists: for ipv4 and ipv6.
 // Every root and subnet is an array, not a map, because the order matters.
 func (l *Lite) MarshalJSON() ([]byte, error) {
-	if l == nil {
-		return []byte("null"), nil
-	}
 	return l.liteTable.MarshalJSON()
 }
 
 // MarshalText implements the [encoding.TextMarshaler] interface,
 // just a wrapper for [liteTable.Fprint].
 func (l *Lite) MarshalText() ([]byte, error) {
-	if l == nil {
-		return []byte{}, nil
-	}
 	return l.liteTable.MarshalText()
 }
 
@@ -493,6 +439,70 @@ func (l *liteTable[V]) rootNodeByVersion(is4 bool) *nodes.LiteNode[V] {
 		return &l.root4
 	}
 	return &l.root6
+}
+
+// Insert adds or updates a prefix-value pair in the routing table.
+// If the prefix already exists, its value is updated; otherwise a new entry is created.
+// Invalid prefixes are silently ignored.
+//
+// The prefix is automatically canonicalized using pfx.Masked() to ensure
+// consistent behavior regardless of host bits in the input.
+func (l *liteTable[V]) Insert(pfx netip.Prefix, val V) {
+	l.insert(pfx, val)
+}
+
+// InsertPersist is similar to Insert but the receiver isn't modified.
+//
+// All nodes touched during insert are cloned and a new liteTable is returned.
+// This is not a full [liteTable.Clone], all untouched nodes are still referenced
+// from both Tables.
+//
+// Due to cloning overhead this is significantly slower than Insert,
+// typically taking μsec instead of nsec.
+func (l *liteTable[V]) InsertPersist(pfx netip.Prefix, val V) *liteTable[V] {
+	return l.insertPersist(pfx, val)
+}
+
+// Modify applies an insert, update, or delete operation for the value
+// associated with the given prefix. The supplied callback decides the
+// operation: it is called with the current value (or zero if not found)
+// and a boolean indicating whether the prefix exists. The callback must
+// return a new value and a delete flag: del == false inserts or updates,
+// del == true deletes the entry if it exists (otherwise no-op).
+//
+// The operation is determined by the callback function, which is called with:
+//
+//	val:   the current value (or zero value if not found)
+//	found: true if the prefix currently exists, false otherwise
+//
+// The callback returns:
+//
+//	val: the new value to insert or update (ignored if del == true)
+//	del: true to delete the entry, false to insert or update
+//
+// Summary of callback semantics:
+//
+//	| cb-input        | cb-return       | Ops    |
+//	------------------------------------- --------
+//	| (zero,   false) | (_,      true)  | no-op  |
+//	| (zero,   false) | (newVal, false) | insert |
+//	| (oldVal, true)  | (newVal, false) | update |
+//	| (oldVal, true)  | (_,      true)  | delete |
+//	------------------------------------- --------
+func (t *liteTable[V]) Modify(pfx netip.Prefix, cb func(_ V, ok bool) (_ V, del bool)) {
+	if !pfx.IsValid() {
+		return
+	}
+
+	// canonicalize prefix
+	pfx = pfx.Masked()
+
+	is4 := pfx.Addr().Is4()
+
+	n := t.rootNodeByVersion(is4)
+
+	delta := n.Modify(pfx, cb)
+	t.sizeUpdate(is4, delta)
 }
 
 // Contains reports whether any stored prefix covers the given IP address.
@@ -565,7 +575,7 @@ func (l *liteTable[V]) LookupPrefix(pfx netip.Prefix) (val V, exists bool) {
 // match any address in the provided prefix range.
 //
 // This is functionally identical to LookupPrefix but additionally returns the
-// matching prefix (lpmPfx) itself along with the value.
+// matching LPM prefix itself along with the value.
 //
 // This method is slower than LookupPrefix and should only be used if the
 // matching lpm entry is also required for other reasons.
@@ -593,12 +603,12 @@ func (l *liteTable[V]) lookupPrefixLPM(pfx netip.Prefix, withLPM bool) (lpmPfx n
 	bits := pfx.Bits()
 	is4 := ip.Is4()
 	octets := ip.AsSlice()
-	lastOctetPlusOne, lastBits := lastOctetPlusOneAndLastBits(pfx)
+	lastOctetPlusOne, lastBits := nodes.LastOctetPlusOneAndLastBits(pfx)
 
 	n := l.rootNodeByVersion(is4)
 
 	// record path to leaf node
-	stack := [maxTreeDepth]*nodes.LiteNode[V]{}
+	stack := [nodes.MaxTreeDepth]*nodes.LiteNode[V]{}
 
 	var depth int
 	var octet byte
@@ -606,7 +616,7 @@ func (l *liteTable[V]) lookupPrefixLPM(pfx netip.Prefix, withLPM bool) (lpmPfx n
 LOOP:
 	// find the last node on the octets path in the trie,
 	for depth, octet = range octets {
-		depth = depth & depthMask // BCE
+		depth &= nodes.DepthMask // BCE
 
 		// stepped one past the last stride of interest; back up to last and break
 		if depth > lastOctetPlusOne {
@@ -657,7 +667,7 @@ LOOP:
 
 	// start backtracking, unwind the stack
 	for ; depth >= 0; depth-- {
-		depth = depth & depthMask // BCE
+		depth &= nodes.DepthMask // BCE
 
 		n = stack[depth]
 

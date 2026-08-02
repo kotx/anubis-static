@@ -14,7 +14,7 @@ func TestLocalizationService(t *testing.T) {
 	service := NewLocalizationService()
 
 	loadingStrMap := map[string]string{
-		"de":    "Ladevorgang...",
+		"de":    "Wird geladen …",
 		"en":    "Loading...",
 		"es":    "Cargando...",
 		"et":    "Laadin...",
@@ -30,10 +30,11 @@ func TestLocalizationService(t *testing.T) {
 		"tr":    "Yükleniyor...",
 		"ru":    "Загрузка...",
 		"uk":    "Завантаження...",
-		"vi":    "Đang nạp...",
+		"vi":    "Đang tải...",
 		"zh-CN": "加载中...",
 		"zh-TW": "載入中...",
 		"sv":    "Laddar...",
+		"bg":    "Зареждане...",
 	}
 
 	var keys []string
@@ -85,7 +86,7 @@ func loadManifest(t *testing.T) manifest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fin.Close()
+	defer fin.Close() //nolint:errcheck
 
 	var result manifest
 	if err := json.NewDecoder(fin).Decode(&result); err != nil {
@@ -103,7 +104,7 @@ func TestComprehensiveTranslations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fin.Close()
+	defer fin.Close() //nolint:errcheck
 
 	if err := json.NewDecoder(fin).Decode(&translations); err != nil {
 		t.Fatal(err)

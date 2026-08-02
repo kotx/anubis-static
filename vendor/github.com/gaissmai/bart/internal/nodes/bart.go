@@ -8,37 +8,34 @@ import (
 
 	"github.com/gaissmai/bart/internal/lpm"
 	"github.com/gaissmai/bart/internal/sparse"
+	"github.com/gaissmai/bart/internal/value"
 )
 
-// BartNode is a trie level BartNode in the multibit routing table.
+// BartNode is a trie level node in the multibit routing table.
 //
 // Each BartNode contains two conceptually different arrays:
-//   - prefixes: representing routes, using a complete binary tree layout
-//     driven by the baseIndex() function from the ART algorithm.
-//   - children: holding subtries or path-compressed leaves/fringes with
+//
+//   - Prefixes stores routing entries (prefix -> value),
+//     laid out as a complete binary tree using the baseIndex()
+//     function from the ART algorithm.
+//
+//   - Children: holding subtries or path-compressed leaves/fringes with
 //     a branching factor of 256 (8 bits per stride).
+//
+// Entries in Children may be:
+//   - *BartNode[V]   -> internal child node for further traversal
+//   - *LeafNode[V]   -> path-comp. node (depth < maxDepth - 1)
+//   - *FringeNode[V] -> path-comp. node (depth == maxDepth - 1, stride-aligned: /8, /16, ... /128)
+//
+// Note: Both *LeafNode and *FringeNode entries are only created by path compression.
+// Prefixes that match exactly at the maximum trie depth (depth == maxDepth) are
+// never stored as Children, but always directly in the prefixes array at that level.
 //
 // Unlike the original ART, this implementation uses popcount-compressed sparse arrays
 // instead of fixed-size arrays. Array slots are not pre-allocated; insertion
 // and lookup rely on fast bitset operations and precomputed rank indexes.
-//
-// See doc/artlookup.pdf for the mapping mechanics and prefix tree details.
 type BartNode[V any] struct {
-	// Prefixes stores routing entries (prefix -> value),
-	// laid out as a complete binary tree using baseIndex().
 	Prefixes sparse.Array256[V]
-
-	// Children holds subnodes for the 256 possible next-hop paths
-	// at this trie level (8-bit stride).
-	//
-	// Entries in Children may be:
-	//   - *BartNode[V]   -> internal child node for further traversal
-	//   - *LeafNode[V]   -> path-comp. node (depth < maxDepth - 1)
-	//   - *FringeNode[V] -> path-comp. node (depth == maxDepth - 1, stride-aligned: /8, /16, ... /128)
-	//
-	// Note: Both *LeafNode and *FringeNode entries are only created by path compression.
-	// Prefixes that match exactly at the maximum trie depth (depth == maxDepth) are
-	// never stored as Children, but always directly in the prefixes array at that level.
 	Children sparse.Array256[any]
 }
 
@@ -66,7 +63,8 @@ func (n *BartNode[V]) ChildCount() int {
 // It returns true if a prefix already existed at that index (indicating an update),
 // false if this is a new insertion.
 func (n *BartNode[V]) InsertPrefix(idx uint8, val V) (exists bool) {
-	return n.Prefixes.InsertAt(idx, val)
+	_, exists = n.Prefixes.InsertAt(idx, val)
+	return
 }
 
 // GetPrefix retrieves the value associated with the prefix at the given index.
@@ -86,9 +84,8 @@ func (n *BartNode[V]) MustGetPrefix(idx uint8) (val V) {
 func (n *BartNode[V]) AllIndices() iter.Seq2[uint8, V] {
 	return func(yield func(uint8, V) bool) {
 		var buf [256]uint8
-		for _, idx := range n.Prefixes.AsSlice(&buf) {
-			val := n.MustGetPrefix(idx)
-			if !yield(idx, val) {
+		for i, idx := range n.Prefixes.AsSlice(&buf) {
+			if !yield(idx, n.Prefixes.Items[i]) {
 				return
 			}
 		}
@@ -106,7 +103,8 @@ func (n *BartNode[V]) DeletePrefix(idx uint8) (exists bool) {
 // The child can be a *BartNode[V], *LeafNode[V], or *FringeNode[V].
 // Returns true if a child already existed at that address.
 func (n *BartNode[V]) InsertChild(addr uint8, child any) (exists bool) {
-	return n.Children.InsertAt(addr, child)
+	_, exists = n.Children.InsertAt(addr, child)
+	return
 }
 
 // GetChild retrieves the child node at the specified address.
@@ -128,8 +126,7 @@ func (n *BartNode[V]) AllChildren() iter.Seq2[uint8, any] {
 		var buf [256]uint8
 		addrs := n.Children.AsSlice(&buf)
 		for i, addr := range addrs {
-			child := n.Children.Items[i]
-			if !yield(addr, child) {
+			if !yield(addr, n.Children.Items[i]) {
 				return
 			}
 		}
@@ -175,7 +172,7 @@ func (n *BartNode[V]) LookupIdx(idx uint8) (top uint8, val V, ok bool) {
 	return top, val, ok
 }
 
-// Lookup is just a simple wrapper for lookupIdx.
+// Lookup is just a simple wrapper for LookupIdx.
 func (n *BartNode[V]) Lookup(idx uint8) (val V, ok bool) {
 	_, val, ok = n.LookupIdx(idx)
 	return val, ok
@@ -191,7 +188,7 @@ func (n *BartNode[V]) Lookup(idx uint8) (val V, ok bool) {
 //
 // Note: The returned node is a new instance with copied slices but only shallow copies of nested nodes,
 // except for LeafNode and FringeNode children which are cloned according to cloneFn.
-func (n *BartNode[V]) CloneFlat(cloneFn CloneFunc[V]) *BartNode[V] {
+func (n *BartNode[V]) CloneFlat(cloneFn value.CloneFunc[V]) *BartNode[V] {
 	if n == nil {
 		return nil
 	}
@@ -248,7 +245,7 @@ func (n *BartNode[V]) CloneFlat(cloneFn CloneFunc[V]) *BartNode[V] {
 //
 // Returns a new instance of BartNode[V] which is a complete deep clone of the
 // receiver node with all descendants.
-func (n *BartNode[V]) CloneRec(cloneFn CloneFunc[V]) *BartNode[V] {
+func (n *BartNode[V]) CloneRec(cloneFn value.CloneFunc[V]) *BartNode[V] {
 	if n == nil {
 		return nil
 	}

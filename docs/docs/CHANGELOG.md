@@ -13,6 +13,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- This changes the project to: -->
 
+## v1.26.2: Papalymo Totolymo: Echo 2
+
+- Automatically verify correct parsing of everything in `(data)`. While doing post-release checks on v1.26.1, I discovered that I incorrectly merged `(data)/services/updown.yaml` in such a way that it became syntactically invalid. This has been mended and multiple layers of CI have been put into place to make sure that `(data)` entries are syntactically and semantically valid.
+
+## v1.26.1: Papalymo Totolymo: Echo 1
+
+- Fix support for semicolon-delimited query parameters that was dropped when moving from [net/http/httputil#ReverseProxy](https://pkg.go.dev/net/http/httputil#ReverseProxy).Director (deprecated) to net/http/httputil#ReverseProxy.Rewrite. This re-enables support for upstreams like gitweb ([#1763](https://github.com/TecharoHQ/anubis/issues/1763)). A functional test has been added to ensure this does not repeat.
+
+### Challenge page robustness
+
+The challenge page can now survive transient failures, reduces the number of requests it makes to the Anubis app, and adds exponential backoff with retries to counteract an overwhelmed server being unable to serve any assets.
+
+Previously if any request for JavaScript assets failed, the entire challenge attempt failed and users were forced to manually refresh the page, which is a bit of a bad user experience. This was made worse when the load balancer does not support HTTP/2, did not have resumable sessions enabled, and was implemented with Apache httpd pre-fork; making each asset fetch do its own TCP/TLS handshake. Under periods of heavy load such that TCP/TLS handshakes timed out, this made Anubis unable to fetch assets consistently or even made in-progress challenge attempts fail, which made challenges impossible to pass.
+
+This has been fixed in a few ways:
+
+- Fetch operations now retry with [exponential backoff](https://en.wikipedia.org/wiki/Exponential_backoff) in hopes that they will eventually be able to get through when the server is less stressed.
+- Attempting to fetch the `main.mjs` script now has fallback watchdog logic that periodically re-attempts to load the script.
+- Worker source code is fetched _once_ and then loaded into workers with a [Blob](https://developer.mozilla.org/en-US/docs/Web/API/Blob) instead of having each worker do an independent fetch of the worker source code.
+- Individual workers can now die without making the entire challenge attempt fail. Surviving workers will cover the rest of the nonce space.
+- When worker construction fails, already running proof of work workers are terminated instead of staying active as headless unmonitored infinite loops.
+- Proof of work failures are now exposed as untranslated real errors. Browsers signal script load failures with real Events so the challenge failure page now shows a useful message.
+
+## v1.26.0: Papalymo Totolymo
+
+- Add option to [disable the honeypot](./admin/policies.mdx#honeypot-configuration).
+- Add `(data)/clients/google-user-triggered-fetchers.yaml` snippet that allows Google-owned user-triggered fetchers (Google Translate's website translation proxy, Google Read Aloud, Google Messages link previews) by their [published IP ranges](https://developers.google.com/static/crawling/ipranges/user-triggered-fetchers-google.json), fixing the infinite challenge loop for visitors using Google Translate ([#444](https://github.com/TecharoHQ/anubis/issues/444))
+- Update QwantBot remote addresses range with latest value
+- Migrate check-spelling workflow config to [cspell](https://cspell.org/)
+- Add [Anubis Kubernetes Operator](https://github.com/eznix86/anubis-kubernetes-operator/) to the docs ([#1675](https://github.com/TecharoHQ/anubis/pull/1675)).
+- Bump Playwright browser tooling to 1.61.1 and playwright-go to v0.6100.0.
+- Add FreeBSD/Windows binaries to the yeetfile.
+- Add systemd system extensions to the yeetfile.
+- Set an explicit esbuild `--target=chrome66` so modern syntax (e.g. optional chaining) is transpiled down. This lowers the minimum supported browser from Chrome 80 to Chrome 66.
+- Patch [GHSA-6wcg-mqvh-fcvg](https://github.com/TecharoHQ/anubis/security/advisories/GHSA-6wcg-mqvh-fcvg) by containing subrequest logic to Anubis instances in subrequest mode.
+- Implement robot9001 style delays on the honeypot feature so that the first hit takes 1 millisecond, the second takes 2, etc.
+- Move metrics server configuration to [the policy file](./admin/policies.mdx#metrics-server).
+- Expose [pprof endpoints](https://pkg.go.dev/net/http/pprof) on the metrics listener to enable profiling Anubis in production.
+- fix: prevent nil pointer panic in challenge validation when threshold rules match during PassChallenge (#1463)
+- Instruct reverse proxies to not cache error pages.
+- Fixed mixed tab/space indentation in Caddy documentation code block
+- Improve error messages and fix broken REDIRECT_DOMAINS link in docs ([#1193](https://github.com/TecharoHQ/anubis/issues/1193))
+- Add Bulgarian locale ([#1394](https://github.com/TecharoHQ/anubis/pull/1394))
+- Fixed case-sensitivity mismatch in geoipchecker.go
+- Use [Go's native version stamping](https://michael.stapelberg.ch/posts/2026-04-05-stamp-it-all-programs-must-report-their-version/) instead of a handrolled variant.
+- Fix CEL internal errors when iterating `headers`/`query` map wrappers by implementing map iterators for `HTTPHeaders` and `URLValues` ([#1465](https://github.com/TecharoHQ/anubis/pull/1465)).
+- Enable [metrics serving via TLS](./admin/policies.mdx#tls), including [mutual TLS (mTLS)](./admin/policies.mdx#mtls).
+- Enable [HTTP basic auth](./admin/policies.mdx#http-basic-authentication) for the metrics server.
+- Fix a bug in the dataset poisoning maze that could allow denial of service [#1580](https://github.com/TecharoHQ/anubis/issues/1580).
+- Add config option to add ASN to logs/metrics.
+- Log weight when issuing challenge.
+- Block x.ai's crawler for code review training.
+- Gate pprof endpoints behind `metrics.debug` in the policy file.
+- Limit naive honeypot r9k delay to one second.
+- Fix an obscure case where adding query values to a subrequest match could cause an invalid rule match when using path based matching for protected resources.
+- Anubis now requires Go 1.26 to build.
+- Fix an edge case where load average expression values could nil pointer dereference when Anubis just started up.
+- Fix an obscure case where Anubis in subrequest mode could allow redirects to invalid domains with strange instructions.
+- Fix `path_regex` and CEL `path` rules not matching when using Traefik `forwardAuth` middleware. Anubis now checks `X-Forwarded-Uri` (Traefik) in addition to `X-Original-URI` (nginx) when resolving the request path in subrequest mode ([#1628](https://github.com/TecharoHQ/anubis/issues/1628)).
+- Validate bounds in the CEL `randInt` helper so non-positive or platform-overflowing arguments surface a typed CEL error instead of an evaluator panic.
+- Fix a race in the bbolt store where the asynchronous cleanup scheduled by an expired read could delete a value that had just been refreshed; the delete now only fires when the key still carries the same expired generation it observed.
+- Marginally increase the performances of requests processing
+- Marginally improve the performances of PoW validation
+- Marginally improve the performances of challenges generation/display
+- Significantly improve the performances of the gzip middleware
+- Significantly improve the performances of the PoW validation
+- Add trimpath option to artifact builds
+- Add COOKIE_HTTP_ONLY option to set the HttpOnly flag on Anubis cookies
+- Improve the performances of rules validation
+- Only compute the JA4H fingerprint when a policy references the `X-Http-Fingerprint-JA4H` header, taking it off the hot path for configurations that don't use it ([#834](https://github.com/TecharoHQ/anubis/pull/834)).
+- Migrate the target reverse proxy off the deprecated `httputil.ReverseProxy.Director` to `Rewrite` for Go 1.26 compatibility, preserving the inbound `Host` and `X-Forwarded-*`/`Forwarded` headers.
+
 ## v1.25.0: Necron
 
 Hey all,
@@ -406,7 +478,7 @@ Anubis now is able to store things persistently [in memory](./admin/policies.mdx
 
 Anubis now supports localized responses. Locales can be added in [lib/localization/locales/](https://github.com/TecharoHQ/anubis/tree/main/lib/localization/locales). This release includes support for the following languages:
 
-- [Brazilian Portugese](https://github.com/TecharoHQ/anubis/pull/726)
+- [Brazilian Portuguese](https://github.com/TecharoHQ/anubis/pull/726)
 - [Chinese (Simplified)](https://github.com/TecharoHQ/anubis/pull/774)
 - [Chinese (Traditional)](https://github.com/TecharoHQ/anubis/pull/759)
 - English

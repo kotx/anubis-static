@@ -1,19 +1,21 @@
 package proofofwork
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 
-	"github.com/TecharoHQ/anubis/internal"
 	chall "github.com/TecharoHQ/anubis/lib/challenge"
 	"github.com/TecharoHQ/anubis/lib/localization"
 	"github.com/a-h/templ"
 )
 
+//go:generate ./build.sh
 //go:generate go tool github.com/a-h/templ/cmd/templ generate
 
 func init() {
@@ -33,6 +35,10 @@ func (i *Impl) Issue(w http.ResponseWriter, r *http.Request, lg *slog.Logger, in
 }
 
 func (i *Impl) Validate(r *http.Request, lg *slog.Logger, in *chall.ValidateInput) error {
+	if err := in.Valid(); err != nil {
+		return chall.NewError("validate", "invalid input", err)
+	}
+
 	rule := in.Rule
 	challenge := in.Challenge.RandomData
 
@@ -41,7 +47,7 @@ func (i *Impl) Validate(r *http.Request, lg *slog.Logger, in *chall.ValidateInpu
 		return chall.NewError("validate", "invalid response", fmt.Errorf("%w nonce", chall.ErrMissingField))
 	}
 
-	nonce, err := strconv.Atoi(nonceStr)
+	_, err := strconv.Atoi(nonceStr)
 	if err != nil {
 		return chall.NewError("validate", "invalid response", fmt.Errorf("%w: nonce: %w", chall.ErrInvalidFormat, err))
 
@@ -62,11 +68,20 @@ func (i *Impl) Validate(r *http.Request, lg *slog.Logger, in *chall.ValidateInpu
 		return chall.NewError("validate", "invalid response", fmt.Errorf("%w response", chall.ErrMissingField))
 	}
 
-	calcString := fmt.Sprintf("%s%d", challenge, nonce)
-	calculated := internal.SHA256sum(calcString)
+	// Stream the challenge and nonce into a single sha256 hasher to avoid
+	// the intermediate "challenge + nonceStr" concatenation. Hex-encode
+	// the digest into a stack buffer so the comparison runs without
+	// allocating a heap string.
+	h := sha256.New()
+	h.Write([]byte(challenge))
+	h.Write([]byte(nonceStr))
+	var sumBuf [sha256.Size]byte
+	sum := h.Sum(sumBuf[:0])
+	var hexBuf [sha256.Size * 2]byte
+	hex.Encode(hexBuf[:], sum)
 
-	if subtle.ConstantTimeCompare([]byte(response), []byte(calculated)) != 1 {
-		return chall.NewError("validate", "invalid response", fmt.Errorf("%w: wanted response %s but got %s", chall.ErrFailed, calculated, response))
+	if subtle.ConstantTimeCompare([]byte(response), hexBuf[:]) != 1 {
+		return chall.NewError("validate", "invalid response", fmt.Errorf("%w: wanted response %s but got %s", chall.ErrFailed, string(hexBuf[:]), response))
 	}
 
 	// compare the leading zeroes
@@ -74,7 +89,7 @@ func (i *Impl) Validate(r *http.Request, lg *slog.Logger, in *chall.ValidateInpu
 		return chall.NewError("validate", "invalid response", fmt.Errorf("%w: wanted %d leading zeros but got %s", chall.ErrFailed, rule.Challenge.Difficulty, response))
 	}
 
-	lg.Debug("challenge took", "elapsedTime", elapsedTime)
+	lg.DebugContext(r.Context(), "challenge took", "elapsedTime", elapsedTime)
 	chall.TimeTaken.WithLabelValues(i.Algorithm).Observe(elapsedTime)
 
 	return nil

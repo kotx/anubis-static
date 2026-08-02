@@ -7,11 +7,11 @@ import (
 	"cmp"
 	"fmt"
 	"net/netip"
-	"reflect"
 	"strconv"
 	"strings"
 
 	"github.com/gaissmai/bart/internal/art"
+	"github.com/gaissmai/bart/internal/value"
 )
 
 // strideLen represents the byte stride length for the multibit trie.
@@ -179,7 +179,7 @@ func NewFringeNode[V any](val V) *FringeNode[V] {
 //
 // Examples:
 //
-//	e.g. prefix is addr/8, or addr/16, or ... addr/128
+//	e.g., prefix is addr/8, or addr/16, or ... addr/128
 //	depth <  lastOctet :  a leaf, path-compressed
 //	depth == lastOctet :  a fringe, path-compressed
 //	depth == lastOctet+1: a prefix with octet/pfx == 0/0 => idx == 1, a strides default route
@@ -193,7 +193,7 @@ func IsFringe(depth int, pfx netip.Prefix) bool {
 	return depth == lastOctetPlusOne-1 && lastBits == 0
 }
 
-// cmpIndexRank, sort indexes in prefix sort order.
+// CmpIndexRank, sort indexes in prefix sort order.
 func CmpIndexRank(aIdx, bIdx uint8) int {
 	// convert idx [1..255] to prefix
 	aOctet, aBits := art.IdxToPfx(aIdx)
@@ -218,7 +218,7 @@ func CmpIndexRank(aIdx, bIdx uint8) int {
 //
 // Returns the reconstructed netip.Prefix.
 func CidrFromPath(path StridePath, depth int, is4 bool, idx uint8) netip.Prefix {
-	depth = depth & DepthMask // BCE
+	depth &= DepthMask // BCE
 
 	// retrieve the last octet and pfxLen
 	octet, pfxLen := art.IdxToPfx(idx)
@@ -257,7 +257,7 @@ func CidrFromPath(path StridePath, depth int, is4 bool, idx uint8) netip.Prefix 
 //
 // Returns the reconstructed netip.Prefix for the fringe.
 func CidrForFringe(octets []byte, depth int, is4 bool, lastOctet uint8) netip.Prefix {
-	depth = depth & DepthMask // BCE
+	depth &= DepthMask // BCE
 
 	var path StridePath
 	copy(path[:], octets)
@@ -285,10 +285,7 @@ func CidrForFringe(octets []byte, depth int, is4 bool, lastOctet uint8) netip.Pr
 // LastOctetPlusOneAndLastBits returns the count of full 8‑bit strides (bits/8)
 // and the leftover bits in the final stride (bits%8) for pfx.
 //
-// lastOctetPlusOne is the count of full 8‑bit strides (bits/8).
-// lastBits is the remaining bit count in the final stride (bits%8),
-//
-// ATTENTION: Split the IP prefixes at 8bit borders, count from 0.
+// ATTENTION: Split the IP prefixes at 8-bit borders, count from 0.
 //
 //	/7, /15, /23, /31, ..., /127
 //
@@ -297,16 +294,16 @@ func CidrForFringe(octets []byte, depth int, is4 bool, lastOctet uint8) netip.Pr
 //
 //	0.0.0.0/0      => lastOctetPlusOne:  0, lastBits: 0 (default route)
 //	0.0.0.0/7      => lastOctetPlusOne:  0, lastBits: 7
-//	0.0.0.0/8      => lastOctetPlusOne:  1, lastBits: 0 (possible fringe)
-//	10.0.0.0/8     => lastOctetPlusOne:  1, lastBits: 0 (possible fringe)
+//	0.0.0.0/8      => lastOctetPlusOne:  1, lastBits: 0 (fringe candidate)
+//	10.0.0.0/8     => lastOctetPlusOne:  1, lastBits: 0 (fringe candidate)
 //	10.0.0.0/22    => lastOctetPlusOne:  2, lastBits: 6
 //	10.0.0.0/29    => lastOctetPlusOne:  3, lastBits: 5
-//	10.0.0.0/32    => lastOctetPlusOne:  4, lastBits: 0 (possible fringe)
+//	10.0.0.0/32    => lastOctetPlusOne:  4, lastBits: 0 (fringe candidate)
 //
 //	::/0           => lastOctetPlusOne:  0, lastBits: 0 (default route)
-//	::1/128        => lastOctetPlusOne: 16, lastBits: 0 (possible fringe)
+//	::1/128        => lastOctetPlusOne: 16, lastBits: 0 (fringe candidate)
 //	2001:db8::/42  => lastOctetPlusOne:  5, lastBits: 2
-//	2001:db8::/56  => lastOctetPlusOne:  7, lastBits: 0 (possible fringe)
+//	2001:db8::/56  => lastOctetPlusOne:  7, lastBits: 0 (fringe candidate)
 //
 //	/32 and /128 prefixes are special, they never form a new node,
 //	At the end of the trie (IPv4: depth 4, IPv6: depth 16) they are always
@@ -326,62 +323,32 @@ func LastOctetPlusOneAndLastBits(pfx netip.Prefix) (lastOctetPlusOne int, lastBi
 	// lastOctetPlusOne:  range from 0..4 or 0..16 !ATTENTION: not 0..3 or 0..15
 	// lastBits:          range from 0..7
 	bits := pfx.Bits()
-
-	//nolint:gosec  // G115: narrowing conversion is safe here (bits in [0..128])
 	return bits >> 3, uint8(bits & 7)
-}
-
-// Equaler is a generic interface for types that can decide their own
-// equality logic. It can be used to override the potentially expensive
-// default comparison with [reflect.DeepEqual].
-type Equaler[V any] interface {
-	Equal(other V) bool
-}
-
-// equal compares two values of type V for equality.
-// If V implements Equaler[V], that custom equality method is used.
-// Otherwise, [reflect.DeepEqual] is used as a fallback.
-func Equal[V any](v1, v2 V) bool {
-	// you can't assert directly on a type parameter
-	if v1, ok := any(v1).(Equaler[V]); ok {
-		return v1.Equal(v2)
-	}
-	// fallback
-	return reflect.DeepEqual(v1, v2)
-}
-
-// Cloner is an interface that enables deep cloning of values of type V.
-// If a value implements Cloner[V], Table methods such as InsertPersist,
-// ModifyPersist, DeletePersist, UnionPersist, Union and Clone will use
-// its Clone method to perform deep copies.
-type Cloner[V any] interface {
-	Clone() V
-}
-
-// CloneFunc is a type definition for a function that takes a value of type V
-// and returns the (possibly cloned) value of type V.
-type CloneFunc[V any] func(V) V
-
-// copyVal just copies the value.
-func copyVal[V any](val V) V {
-	return val
 }
 
 // CloneLeaf creates and returns a copy of the leafNode receiver.
 // If cloneFn is nil, the value is copied directly without modification.
 // Otherwise, cloneFn is applied to the value for deep cloning.
 // The prefix field is always copied as is.
-func (l *LeafNode[V]) CloneLeaf(cloneFn CloneFunc[V]) *LeafNode[V] {
+func (l *LeafNode[V]) CloneLeaf(cloneFn value.CloneFunc[V]) *LeafNode[V] {
+	if l == nil {
+		return nil
+	}
+
 	if cloneFn == nil {
 		return &LeafNode[V]{Prefix: l.Prefix, Value: l.Value}
 	}
 	return &LeafNode[V]{Prefix: l.Prefix, Value: cloneFn(l.Value)}
 }
 
-// cloneFringe creates and returns a copy of the fringeNode receiver.
+// CloneFringe creates and returns a copy of the FringeNode receiver.
 // If cloneFn is nil, the value is copied directly without modification.
 // Otherwise, cloneFn is applied to the value for deep cloning.
-func (l *FringeNode[V]) CloneFringe(cloneFn CloneFunc[V]) *FringeNode[V] {
+func (l *FringeNode[V]) CloneFringe(cloneFn value.CloneFunc[V]) *FringeNode[V] {
+	if l == nil {
+		return nil
+	}
+
 	if cloneFn == nil {
 		return &FringeNode[V]{Value: l.Value}
 	}

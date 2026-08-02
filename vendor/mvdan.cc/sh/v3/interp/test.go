@@ -116,8 +116,10 @@ func (r *Runner) binTest(ctx context.Context, op syntax.BinTestOperator, x, y st
 		return x != "" || y != ""
 	case syntax.TsBefore:
 		return x < y
-	default: // syntax.TsAfter
+	case syntax.TsAfter:
 		return x > y
+	default:
+		panic(fmt.Sprintf("unsupported binary test operator: %q", op))
 	}
 }
 
@@ -197,7 +199,7 @@ func (r *Runner) unTest(ctx context.Context, op syntax.UnTestOperator, x string)
 	case syntax.TsNempStr:
 		return x != ""
 	case syntax.TsOptSet:
-		if _, opt := r.optByName(x, false); opt != nil {
+		if opt := r.posixOptByName(x); opt != nil {
 			return *opt
 		}
 		return false

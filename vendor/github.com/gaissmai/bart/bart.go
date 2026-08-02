@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Karl Gaissmaier
+// Copyright (c) 2026 Karl Gaissmaier
 // SPDX-License-Identifier: MIT
 
 package bart
@@ -16,12 +16,13 @@ import (
 //
 // The zero value is ready to use.
 //
+// A Table must not be copied by value; always pass by pointer.
+// Nil pointers as receivers or arguments are forbidden and will panic.
+//
 // The Table is safe for concurrent reads, but concurrent reads and writes
 // must be externally synchronized. Mutation via Insert/Delete requires locks,
 // or alternatively, use ...Persist methods which return a modified copy
 // without altering the original table (copy-on-write).
-//
-// A Table must not be copied by value; always pass by pointer.
 //
 // Performance note: Do not pass IPv4-in-IPv6 addresses (e.g., ::ffff:192.0.2.1)
 // as input. The methods do not perform automatic unmapping to avoid unnecessary
@@ -47,6 +48,75 @@ func (t *Table[V]) rootNodeByVersion(is4 bool) *nodes.BartNode[V] {
 		return &t.root4
 	}
 	return &t.root6
+}
+
+// Insert adds or updates a prefix-value pair in the routing table.
+// If the prefix already exists, its value is updated; otherwise a new entry is created.
+// Invalid prefixes are silently ignored.
+//
+// The prefix is automatically canonicalized using pfx.Masked() to ensure
+// consistent behavior regardless of host bits in the input.
+func (t *Table[V]) Insert(pfx netip.Prefix, val V) {
+	t.insert(pfx, val)
+}
+
+// InsertPersist is similar to Insert but the receiver isn't modified.
+//
+// All nodes touched during insert are cloned and a new Table is returned.
+// This is not a full [Table.Clone], all untouched nodes are still referenced
+// from both Tables.
+//
+// If the payload type V contains pointers or needs deep copying,
+// it must implement the Clone method to support correct cloning.
+//
+// Due to cloning overhead this is significantly slower than Insert,
+// typically taking μsec instead of nsec.
+func (t *Table[V]) InsertPersist(pfx netip.Prefix, val V) *Table[V] {
+	return t.insertPersist(pfx, val)
+}
+
+// Modify applies an insert, update, or delete operation for the value
+// associated with the given prefix. The supplied callback decides the
+// operation: it is called with the current value (or zero if not found)
+// and a boolean indicating whether the prefix exists. The callback must
+// return a new value and a delete flag: del == false inserts or updates,
+// del == true deletes the entry if it exists (otherwise no-op).
+//
+// The callback is invoked at most once per call.
+//
+// The operation is determined by the callback function, which is called with:
+//
+//	val:   the current value (or zero value if not found)
+//	found: true if the prefix currently exists, false otherwise
+//
+// The callback returns:
+//
+//	val: the new value to insert or update (ignored if del == true)
+//	del: true to delete the entry, false to insert or update
+//
+// Summary of callback semantics:
+//
+//	| cb-input        | cb-return       | Ops    |
+//	------------------------------------- --------
+//	| (zero,   false) | (_,      true)  | no-op  |
+//	| (zero,   false) | (newVal, false) | insert |
+//	| (oldVal, true)  | (newVal, false) | update |
+//	| (oldVal, true)  | (_,      true)  | delete |
+//	------------------------------------- --------
+func (t *Table[V]) Modify(pfx netip.Prefix, cb func(_ V, ok bool) (_ V, del bool)) {
+	if !pfx.IsValid() {
+		return
+	}
+
+	// canonicalize prefix
+	pfx = pfx.Masked()
+
+	is4 := pfx.Addr().Is4()
+
+	n := t.rootNodeByVersion(is4)
+
+	delta := n.Modify(pfx, cb)
+	t.sizeUpdate(is4, delta)
 }
 
 // Contains reports whether any stored prefix covers the given IP address.
@@ -113,7 +183,7 @@ func (t *Table[V]) Lookup(ip netip.Addr) (val V, ok bool) {
 	n := t.rootNodeByVersion(is4)
 
 	// stack of the traversed nodes for fast backtracking, if needed
-	stack := [maxTreeDepth]*nodes.BartNode[V]{}
+	stack := [nodes.MaxTreeDepth]*nodes.BartNode[V]{}
 
 	// run variable, used after for loop
 	var depth int
@@ -122,7 +192,7 @@ func (t *Table[V]) Lookup(ip netip.Addr) (val V, ok bool) {
 LOOP:
 	// find leaf node
 	for depth, octet = range octets {
-		depth = depth & depthMask // BCE, Lookup must be fast
+		depth &= nodes.DepthMask // BCE, Lookup must be fast
 
 		// push current node on stack for fast backtracking
 		stack[depth] = n
@@ -155,7 +225,7 @@ LOOP:
 
 	// start backtracking, unwind the stack, bounds check eliminated
 	for ; depth >= 0; depth-- {
-		depth = depth & depthMask // BCE
+		depth &= nodes.DepthMask // BCE
 
 		n = stack[depth]
 
@@ -191,7 +261,7 @@ func (t *Table[V]) LookupPrefix(pfx netip.Prefix) (val V, ok bool) {
 // match any address in the provided prefix range.
 //
 // This is functionally identical to LookupPrefix but additionally returns the
-// matching prefix (lpmPfx) itself along with the value.
+// matching LPM prefix itself along with the value.
 //
 // This method is slower than LookupPrefix and should only be used if the
 // matching lpm entry is also required for other reasons.
@@ -214,12 +284,12 @@ func (t *Table[V]) lookupPrefixLPM(pfx netip.Prefix, withLPM bool) (lpmPfx netip
 	bits := pfx.Bits()
 	is4 := ip.Is4()
 	octets := ip.AsSlice()
-	lastOctetPlusOne, lastBits := lastOctetPlusOneAndLastBits(pfx)
+	lastOctetPlusOne, lastBits := nodes.LastOctetPlusOneAndLastBits(pfx)
 
 	n := t.rootNodeByVersion(is4)
 
 	// record path to leaf node
-	stack := [maxTreeDepth]*nodes.BartNode[V]{}
+	stack := [nodes.MaxTreeDepth]*nodes.BartNode[V]{}
 
 	var depth int
 	var octet byte
@@ -227,7 +297,7 @@ func (t *Table[V]) lookupPrefixLPM(pfx netip.Prefix, withLPM bool) (lpmPfx netip
 LOOP:
 	// find the last node on the octets path in the trie,
 	for depth, octet = range octets {
-		depth = depth & depthMask // BCE
+		depth &= nodes.DepthMask // BCE
 
 		// stepped one past the last stride of interest; back up to last and break
 		if depth > lastOctetPlusOne {
@@ -278,7 +348,7 @@ LOOP:
 
 	// start backtracking, unwind the stack
 	for ; depth >= 0; depth-- {
-		depth = depth & depthMask // BCE
+		depth &= nodes.DepthMask // BCE
 
 		n = stack[depth]
 

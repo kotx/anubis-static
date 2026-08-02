@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/TecharoHQ/yeet/internal"
@@ -66,77 +67,16 @@ func Build(p pkgmeta.Package) (foutpath string, err error) {
 
 	var contents files.Contents
 
-	for _, d := range p.EmptyDirs {
-		if d == "" {
-			continue
-		}
+	contents = slices.Concat(contents, p.CopyEmptyDirs(0600))
+	contents = slices.Concat(contents, p.CopyConfigFiles())
+	contents = slices.Concat(contents, p.CopyDocumentation())
+	contents = slices.Concat(contents, p.CopyFiles())
 
-		contents = append(contents, &files.Content{
-			Type:        files.TypeDir,
-			Destination: d,
-			FileInfo: &files.ContentFileInfo{
-				MTime: internal.SourceEpoch(),
-				Mode:  os.FileMode(0600),
-			},
-		})
-	}
-
-	for repoPath, osPath := range p.ConfigFiles {
-		contents = append(contents, &files.Content{
-			Type:        files.TypeConfig,
-			Source:      repoPath,
-			Destination: osPath,
-			FileInfo: &files.ContentFileInfo{
-				Mode:  os.FileMode(0600),
-				MTime: internal.SourceEpoch(),
-			},
-		})
-	}
-
-	for repoPath, rpmPath := range p.Documentation {
-		contents = append(contents, &files.Content{
-			Type:        files.TypeFile,
-			Source:      repoPath,
-			Destination: filepath.Join("/usr/share/doc", p.Name, rpmPath),
-			FileInfo: &files.ContentFileInfo{
-				MTime: internal.SourceEpoch(),
-			},
-		})
-	}
-
-	for repoPath, rpmPath := range p.Files {
-		contents = append(contents, &files.Content{
-			Type:        files.TypeFile,
-			Source:      repoPath,
-			Destination: rpmPath,
-			FileInfo: &files.ContentFileInfo{
-				MTime: internal.SourceEpoch(),
-			},
-		})
-	}
-
-	if err := filepath.Walk(dir, func(path string, stat os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if stat.IsDir() {
-			return nil
-		}
-
-		contents = append(contents, &files.Content{
-			Type:        files.TypeFile,
-			Source:      path,
-			Destination: path[len(dir)+1:],
-			FileInfo: &files.ContentFileInfo{
-				MTime: internal.SourceEpoch(),
-			},
-		})
-
-		return nil
-	}); err != nil {
+	cs, err := p.CopyTree(dir)
+	if err != nil {
 		return "", fmt.Errorf("mkdeb: can't walk output directory: %w", err)
 	}
+	contents = slices.Concat(contents, cs)
 
 	contents, err = files.PrepareForPackager(contents, 0o002, "deb", true, internal.SourceEpoch())
 	if err != nil {
@@ -166,8 +106,6 @@ func Build(p pkgmeta.Package) (foutpath string, err error) {
 		},
 	})
 
-	info.Overridables.RPM.Group = p.Group
-
 	if *internal.GPGKeyID != "" {
 		slog.Debug("using GPG key", "file", *internal.GPGKeyFile, "id", *internal.GPGKeyID)
 		info.Overridables.Deb.Signature.KeyFile = *internal.GPGKeyFile
@@ -177,7 +115,7 @@ func Build(p pkgmeta.Package) (foutpath string, err error) {
 
 	pkg, err := nfpm.Get("deb")
 	if err != nil {
-		return "", fmt.Errorf("mkdeb: can't get RPM packager: %w", err)
+		return "", fmt.Errorf("mkdeb: can't get debian packager: %w", err)
 	}
 
 	foutpath = pkg.ConventionalFileName(info)

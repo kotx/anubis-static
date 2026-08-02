@@ -16,8 +16,11 @@ import (
 	"al.essio.dev/pkg/shellescape"
 	yeetver "github.com/TecharoHQ/yeet"
 	"github.com/TecharoHQ/yeet/confyg/flagconfyg"
+	"github.com/TecharoHQ/yeet/internal/fileglob"
 	"github.com/TecharoHQ/yeet/internal/gitea"
+	"github.com/TecharoHQ/yeet/internal/mkapk"
 	"github.com/TecharoHQ/yeet/internal/mkdeb"
+	"github.com/TecharoHQ/yeet/internal/mkportable"
 	"github.com/TecharoHQ/yeet/internal/mkrpm"
 	"github.com/TecharoHQ/yeet/internal/mktarball"
 	"github.com/TecharoHQ/yeet/internal/pkgmeta"
@@ -116,6 +119,17 @@ func runShellCommand(ctx context.Context, literals []string, exprs ...any) (stri
 	return buf.String(), nil
 }
 
+func fileGlob(pattern string) []string {
+	matches, err := fileglob.Glob(pattern)
+	if err != nil {
+		panic(err)
+	}
+	if matches == nil {
+		return []string{}
+	}
+	return matches
+}
+
 func hostname() string {
 	result, err := os.Hostname()
 	if err != nil {
@@ -169,8 +183,27 @@ func main() {
 		return result
 	})
 
+	vm.Set("confext", map[string]any{
+		"build": func(p pkgmeta.Package) string {
+			if p.Platform != "" && p.Platform != "linux" {
+				return ""
+			}
+
+			foutpath, err := mkportable.Confext(p)
+			if err != nil {
+				panic(err)
+			}
+			return foutpath
+		},
+		"name": "sysext",
+	})
+
 	vm.Set("deb", map[string]any{
 		"build": func(p pkgmeta.Package) string {
+			if p.Platform != "" && p.Platform != "linux" {
+				return ""
+			}
+
 			foutpath, err := mkdeb.Build(p)
 			if err != nil {
 				panic(err)
@@ -192,6 +225,7 @@ func main() {
 				panic(err)
 			}
 		},
+		"glob": fileGlob,
 	})
 
 	vm.Set("git", map[string]any{
@@ -221,8 +255,27 @@ func main() {
 		"println": fmt.Println,
 	})
 
+	vm.Set("apk", map[string]any{
+		"build": func(p pkgmeta.Package) string {
+			if p.Platform != "" && p.Platform != "linux" {
+				return ""
+			}
+
+			foutpath, err := mkapk.Build(p)
+			if err != nil {
+				panic(err)
+			}
+			return foutpath
+		},
+		"name": "apk",
+	})
+
 	vm.Set("rpm", map[string]any{
 		"build": func(p pkgmeta.Package) string {
+			if p.Platform != "" && p.Platform != "linux" {
+				return ""
+			}
+
 			foutpath, err := mkrpm.Build(p)
 			if err != nil {
 				panic(err)
@@ -230,6 +283,36 @@ func main() {
 			return foutpath
 		},
 		"name": "rpm",
+	})
+
+	vm.Set("portable", map[string]any{
+		"build": func(p pkgmeta.Package) string {
+			if p.Platform != "" && p.Platform != "linux" {
+				return ""
+			}
+
+			foutpath, err := mkportable.Portable(p)
+			if err != nil {
+				panic(err)
+			}
+			return foutpath
+		},
+		"name": "portable",
+	})
+
+	vm.Set("sysext", map[string]any{
+		"build": func(p pkgmeta.Package) string {
+			if p.Platform != "" && p.Platform != "linux" {
+				return ""
+			}
+
+			foutpath, err := mkportable.Sysext(p)
+			if err != nil {
+				panic(err)
+			}
+			return foutpath
+		},
+		"name": "sysext",
 	})
 
 	vm.Set("tarball", map[string]any{
