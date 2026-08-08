@@ -401,6 +401,9 @@ github.com/felixge/httpsnoop
 ## explicit; go 1.17
 github.com/fsnotify/fsnotify
 github.com/fsnotify/fsnotify/internal
+# github.com/fvbommel/sortorder v1.1.0
+## explicit; go 1.13
+github.com/fvbommel/sortorder
 # github.com/gaissmai/bart v0.28.0
 ## explicit; go 1.24.0
 github.com/gaissmai/bart
@@ -978,6 +981,7 @@ golang.org/x/oauth2/internal
 # golang.org/x/sync v0.21.0
 ## explicit; go 1.25.0
 golang.org/x/sync/errgroup
+golang.org/x/sync/semaphore
 # golang.org/x/sys v0.46.0
 ## explicit; go 1.25.0
 golang.org/x/sys/cpu
@@ -986,6 +990,7 @@ golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
 golang.org/x/sys/windows/registry
+golang.org/x/sys/windows/svc
 # golang.org/x/telemetry v0.0.0-20260508192327-42602be52be6
 ## explicit; go 1.25.0
 golang.org/x/telemetry

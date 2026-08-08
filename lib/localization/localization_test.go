@@ -21,6 +21,7 @@ func TestLocalizationService(t *testing.T) {
 		"fil":   "Naglo-load...",
 		"fr":    "Chargement...",
 		"ja":    "ロード中...",
+		"hr":    "Učitavanje...",
 		"is":    "Hleður...",
 		"nb":    "Laster inn...",
 		"nl":    "Laden...",
@@ -173,6 +174,40 @@ func TestAcceptLanguageQualityFactors(t *testing.T) {
 			gotLang := sl.GetLang()
 			if gotLang != tc.expectedLang {
 				t.Errorf("Accept-Language %q: expected %s, got %s", tc.acceptLanguage, tc.expectedLang, gotLang)
+			}
+		})
+	}
+}
+
+func TestAcceptLanguageUndetermined(t *testing.T) {
+	service := NewLocalizationService()
+
+	testCases := []struct {
+		name           string
+		acceptLanguage string
+		expectedLang   string
+	}{
+		{"undetermined", "und", "en"},
+		{"undetermined_with_quality", "und;q=0.9", "en"},
+		{"undetermined_below_german", "de,und;q=0.9", "de"},
+		{"unknown_subtag", "xx", "en"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/", nil)
+			req.Header.Set("Accept-Language", tc.acceptLanguage)
+
+			sl := &SimpleLocalizer{Localizer: service.GetLocalizerFromRequest(req)}
+
+			// T uses MustLocalize, so an unresolved message panics and serving the
+			// challenge page fails. GetLang alone cannot catch that: it swallows the
+			// lookup error and reports "en" either way.
+			if got := sl.T("making_sure_not_bot"); got == "" {
+				t.Errorf("Accept-Language %q: empty translation", tc.acceptLanguage)
+			}
+			if got := sl.GetLang(); got != tc.expectedLang {
+				t.Errorf("Accept-Language %q: expected %s, got %s", tc.acceptLanguage, tc.expectedLang, got)
 			}
 		})
 	}
